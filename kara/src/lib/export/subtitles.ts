@@ -38,14 +38,28 @@ function formatAssTimecode(value: number): string {
   return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(fraction).padStart(2, '0')}`
 }
 
-function karaokeText(segment: LyricSegment, enabled: boolean): string {
+function karaokeText(segment: LyricSegment, enabled: boolean, dialogueStart = segment.start): string {
   if (!enabled || segment.words.length === 0) return assEscape(segment.text)
-  return segment.words
-    .map((word) => {
-      const duration = Math.max(1, Math.round((word.end - word.start) * 100))
-      return `{\\k${duration}}${assEscape(word.text)}`
-    })
-    .join(' ')
+  const words = [...segment.words]
+    .map((word) => ({
+      ...word,
+      start: Math.max(dialogueStart, Math.min(segment.end, word.start)),
+      end: Math.max(segment.start, Math.min(segment.end, word.end)),
+    }))
+    .filter((word) => word.text.trim() && word.end > word.start)
+    .sort((a, b) => a.start - b.start || a.end - b.end)
+  if (!words.length) return assEscape(segment.text)
+  let cursor = dialogueStart
+  return words.map((word, index) => {
+    const effectiveStart = Math.max(cursor, word.start)
+    const gap = Math.max(0, Math.round((effectiveStart - cursor) * 100))
+    const end = Math.max(effectiveStart + 0.01, word.end)
+    const duration = Math.max(1, Math.round((end - effectiveStart) * 100))
+    cursor = Math.max(cursor, end)
+    const separator = index === 0 || gap > 0 ? '' : ' '
+    const gapSyllable = gap > 0 ? `{\\k${gap}} ` : ''
+    return `${separator}${gapSyllable}{\\k${duration}}${assEscape(word.text)}`
+  }).join('')
 }
 
 const ROLE_STYLE: Record<SpeakerRole, string> = {
@@ -80,7 +94,7 @@ export function buildAss(segments: LyricSegment[], options: ExportOptions, video
     const start = Math.max(0, segment.start - options.leadInMs / 1000)
     const end = Math.max(start + 0.05, segment.end + options.leadOutMs / 1000)
     const prefix = options.includeSpeakerPrefix ? ROLE_PREFIX[segment.speakerRole] : ''
-    const text = `{\\an5\\pos(${Math.round(videoSettings.lyricPosition.x * videoSettings.width)},${Math.round(videoSettings.lyricPosition.y * videoSettings.height)})}${assEscape(prefix)}${karaokeText(segment, options.includeKaraokeTags)}`
+    const text = `{\\an5\\pos(${Math.round(videoSettings.lyricPosition.x * videoSettings.width)},${Math.round(videoSettings.lyricPosition.y * videoSettings.height)})}${assEscape(prefix)}${karaokeText(segment, options.includeKaraokeTags, start)}`
     lines.push(`Dialogue: 0,${formatAssTimecode(start)},${formatAssTimecode(end)},${ROLE_STYLE[segment.speakerRole]},,0,0,0,,${text}`)
   }
   return lines.join('\n')

@@ -11,7 +11,7 @@
     "desktop:electron": "wait-on http://127.0.0.1:4173 && cross-env ELECTRON_RENDERER_URL=http://127.0.0.1:4173 electron .",
     "build": "tsc --noEmit && vite build",
     "desktop:build": "vite build --base=./",
-    "desktop:dist": "npm run desktop:build && electron-packager . KaraStudio --platform=win32 --arch=x64 --out=release --overwrite --asar.unpackDir=node_modules/ffmpeg-static --prune=true",
+    "desktop:dist": "npm run desktop:build && electron-packager . KaraStudio --platform=win32 --arch=x64 --out=release --overwrite --asar.unpackDir=node_modules/ffmpeg-static --extra-resource=electron/local-whisper-worker.py --prune=true",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

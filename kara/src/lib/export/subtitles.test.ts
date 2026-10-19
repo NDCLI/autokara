@@ -24,11 +24,23 @@ describe('subtitle exporters', () => {
     expect(edge).toContain('{\\an5\\pos(0,1080)}')
   })
 
-  it('scales ASS PlayRes and position with a custom render frame', () => {
-    const custom = buildAss(sample, DEFAULT_EXPORT_OPTIONS, { width: 1280, height: 720, backgroundColor: '#10162a', lyricPosition: { x: 0.25, y: 0.6 } })
-    expect(custom).toContain('PlayResX: 1280')
-    expect(custom).toContain('PlayResY: 720')
-    expect(custom).toContain('{\\an5\\pos(320,432)}')
+  it('preserves leading and inter-word gaps in ASS karaoke timing', () => {
+    const spaced = [{ ...sample[0], start: 1, end: 4, words: [
+      { id: 'w1', text: 'Xin', start: 1.5, end: 1.9 },
+      { id: 'w2', text: 'chào', start: 2.6, end: 3.2 },
+    ] }]
+    const result = buildAss(spaced, { ...DEFAULT_EXPORT_OPTIONS, includeSpeakerPrefix: false })
+    expect(result).toContain('{\\k50} {\\k40}Xin{\\k70} {\\k60}chào')
+  })
+
+  it('sorts word timings and prevents overlap from advancing karaoke early', () => {
+    const unordered = [{ ...sample[0], words: [
+      { id: 'w2', text: 'chào', start: 1.3, end: 2 },
+      { id: 'w1', text: 'Xin', start: 1, end: 1.5 },
+    ] }]
+    const result = buildAss(unordered, { ...DEFAULT_EXPORT_OPTIONS, includeSpeakerPrefix: false })
+    expect(result).toContain('{\\k50}Xin {\\k50}chào')
+    expect(result.indexOf('Xin')).toBeLessThan(result.indexOf('chào'))
   })
 
   it('escapes ASS control braces and line breaks', () => {

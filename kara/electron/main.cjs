@@ -2,9 +2,10 @@ const { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage } = requ
 const fs = require('node:fs/promises')
 const fsSync = require('node:fs')
 const path = require('node:path')
+const { pathToFileURL } = require('node:url')
 const { spawn } = require('node:child_process')
 const { randomUUID } = require('node:crypto')
-const { buildFfmpegArgs, parseProgressLine } = require('./render-utils.cjs')
+const { buildFfmpegArgs, assertOutputDoesNotMatchInputs, parseProgressLine, publishRenderOutput } = require('./render-utils.cjs')
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
 const renderJobs = new Map()
@@ -12,6 +13,17 @@ let capabilityCheck
 let quitRequested = false
 let mainWindow = null
 const settingsFile = () => path.join(app.getPath('userData'), 'provider-settings.json')
+const localWhisperWorker = () => {
+  const candidates = [
+    path.join(process.resourcesPath, 'local-whisper-worker.py'),
+    path.join(process.resourcesPath, 'electron', 'local-whisper-worker.py'),
+    path.join(__dirname, 'local-whisper-worker.py'),
+  ]
+  const bundled = candidates.find((candidate) => fsSync.existsSync(candidate)) || candidates[0]
+  return bundled.includes(`${path.sep}app.asar${path.sep}`)
+    ? bundled.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`)
+    : bundled
+}
 
 const DEFAULT_PROVIDER = {
   kind: 'mock',
@@ -170,8 +182,75 @@ function normalizeCustom(payload, profile) {
   return { segments }
 }
 
+function spawnLocalWorker(args) {
+  const worker = localWhisperWorker()
+  const candidates = process.env.KARA_PYTHON
+    ? [{ executable: process.env.KARA_PYTHON, prefix: [] }]
+    : process.platform === 'win32'
+      ? [{ executable: 'python', prefix: [] }, { executable: 'py', prefix: ['-3'] }]
+      : [{ executable: 'python3', prefix: [] }, { executable: 'python', prefix: [] }]
+  return new Promise((resolve, reject) => {
+    let index = 0
+    let child
+    let settled = false
+    let lastError
+    const start = () => {
+      if (index >= candidates.length) {
+        reject(lastError || new Error('Không tìm thấy Python runtime để chạy timestamp local.'))
+        return
+      }
+      const candidate = candidates[index++]
+      child = spawn(candidate.executable, [...candidate.prefix, worker, ...args], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString()
+        const lines = stdout.split(/\r?\n/)
+        stdout = lines.pop() || ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const message = JSON.parse(line)
+            if (message.type === 'result') return resolve(message)
+            if (message.type === 'error') lastError = new Error(message.message || 'Local timestamp worker thất bại.')
+          } catch { /* ignore non-JSON worker output */ }
+        }
+      })
+      child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
+      child.once('error', (error) => {
+        lastError = error
+        start()
+      })
+      child.once('close', (code) => {
+        if (settled) return
+        if (code !== 0 && !lastError && stderr.trim()) lastError = new Error(stderr.trim().split(/\r?\n/).at(-1))
+        if (code !== 0) start()
+      })
+    }
+    const finish = (handler) => (value) => {
+      if (settled) return
+      settled = true
+      handler(value)
+    }
+    const originalResolve = resolve
+    resolve = finish(originalResolve)
+    start()
+  })
+}
+
+async function callLocalWhisper(profile, audioPath) {
+  ensureFile(audioPath)
+  if (!fsSync.existsSync(localWhisperWorker())) throw new Error('Không tìm thấy worker timestamp local trong ứng dụng.')
+  const requestedModel = profile.localModelPath || profile.model
+  const model = profile.localModelPath || (['tiny', 'base', 'small', 'medium'].includes(requestedModel) ? requestedModel : 'small')
+  const result = await spawnLocalWorker(['--audio', ensureFile(audioPath), '--model', model, '--language', profile.language || 'vi', '--device', profile.localDevice || 'auto'])
+  if (!Array.isArray(result.segments)) throw new Error('Worker local trả về dữ liệu timestamp không hợp lệ.')
+  return { duration: result.duration, segments: result.segments }
+}
+
 async function callProvider(profile, audioPath, lyricsText) {
   if (profile.kind === 'mock') return mockTranscript(lyricsText)
+  if (profile.kind === 'local') return callLocalWhisper(profile, audioPath)
   const audio = await fs.readFile(ensureFile(audioPath))
   const apiKey = await getApiKey()
   if (!apiKey) throw new Error('Chưa có API key. Mở Cấu hình provider để lưu key trên máy này.')
@@ -195,6 +274,7 @@ async function callProvider(profile, audioPath, lyricsText) {
   if (!response.ok) throw new Error(`Provider trả về HTTP ${response.status}.`)
   return profile.kind === 'deepgram' ? normalizeDeepgram(payload) : normalizeCustom(payload, profile)
 }
+
 
 function resolveFfmpegPath() {
   const candidates = []
@@ -259,7 +339,7 @@ function sendRenderProgress(job, percent, status) {
 function cancelRenderJob(job) {
   if (job.closed || job.canceled) return
   job.canceled = true
-  if (job.child && !job.child.killed) job.child.kill()
+  if (job.child && !job.ffmpegClosed && !job.child.killed) job.child.kill()
 }
 
 function safeOutputName(value) {
@@ -322,7 +402,7 @@ async function runRenderJob(owner, request, outputPath, ffmpegPath, job = { id: 
       child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-8000) })
       child.once('error', () => reject(new Error('Không thể khởi động FFmpeg. Hãy kiểm tra bản cài đặt của ứng dụng.')))
       child.once('close', (code) => {
-        job.closed = true
+        job.ffmpegClosed = true
         if (job.canceled) return resolve(null)
         if (code !== 0) {
           if (/No such filter.*subtitles|filter.*not found/i.test(stderr)) return reject(new Error('FFmpeg không có bộ lọc phụ đề libass cần thiết.'))
@@ -333,10 +413,10 @@ async function runRenderJob(owner, request, outputPath, ffmpegPath, job = { id: 
     })
     if (job.canceled) return null
     if (!fsSync.existsSync(tempPath)) throw new Error('FFmpeg kết thúc nhưng không tạo được file video.')
-    await fs.rm(outputPath, { force: true })
-    await fs.rename(tempPath, outputPath)
+    const published = await publishRenderOutput(tempPath, outputPath, { isCanceled: () => job.canceled })
+    if (published.status === 'canceled') return null
     sendRenderProgress(job, 100, 'Video đã render xong.')
-    return { path: outputPath }
+    return { path: published.path }
   } catch (error) {
     if (job.canceled) return null
     throw error
@@ -398,7 +478,7 @@ function registerIpc() {
     if (renderJobs.has(request.jobId)) throw new Error('Render này đang chạy.')
     const owner = BrowserWindow.fromWebContents(event.sender)
     if (!owner || owner.isDestroyed()) throw new Error('Cửa sổ render không còn hoạt động.')
-    const job = { id: request.jobId, owner, outputPath: null, tempPath: null, subtitlePath: null, child: null, canceled: false, closed: false, finished: null }
+    const job = { id: request.jobId, owner, outputPath: null, tempPath: null, subtitlePath: null, child: null, canceled: false, closed: false, ffmpegClosed: false, finished: null }
     renderJobs.set(job.id, job)
     const operation = (async () => {
       try {
@@ -412,6 +492,7 @@ function registerIpc() {
         })
         if (job.canceled || result.canceled || !result.filePath) return null
         const outputPath = result.filePath.toLowerCase().endsWith('.mp4') ? result.filePath : `${result.filePath}.mp4`
+        assertOutputDoesNotMatchInputs(outputPath, audioPath, backgroundPath)
         if ([...renderJobs.values()].some((active) => active !== job && active.outputPath && path.resolve(active.outputPath).toLowerCase() === path.resolve(outputPath).toLowerCase())) {
           throw new Error('Đang có một render khác sử dụng file đích này.')
         }
@@ -438,7 +519,7 @@ app.whenReady().then(() => {
   protocol.handle('kara-media', (request) => {
     const encodedPath = request.url.replace('kara-media://local/', '')
     const target = ensureFile(decodeURIComponent(encodedPath))
-    return net.fetch(`file://${target}`)
+    return net.fetch(pathToFileURL(target).toString())
   })
   registerIpc()
   createWindow()

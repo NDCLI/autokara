@@ -49,7 +49,7 @@ function validateSpeaker(speaker: unknown): asserts speaker is SpeakerProfile {
 function validateProvider(provider: unknown): asserts provider is ProviderProfile {
   if (!provider || typeof provider !== 'object') throw new Error('Provider không hợp lệ.')
   const item = provider as Partial<ProviderProfile>
-  if (!['mock', 'deepgram', 'custom'].includes(item.kind ?? '') || typeof item.endpoint !== 'string') {
+  if (!['mock', 'local', 'deepgram', 'custom'].includes(item.kind ?? '') || typeof item.endpoint !== 'string') {
     throw new Error('Cấu hình provider không hợp lệ.')
   }
 }
@@ -58,7 +58,7 @@ function validateVideoSettings(value: unknown): asserts value is VideoSettings {
   if (!value || typeof value !== 'object') throw new Error('Cấu hình video không hợp lệ.')
   const video = value as Partial<VideoSettings>
   if (!Number.isInteger(video.width) || !Number.isInteger(video.height) || video.width! < 16 || video.height! < 16 || video.width! > 3840 || video.height! > 2160 || video.width! % 2 !== 0 || video.height! % 2 !== 0) {
-    throw new Error('Kích thước video không hợp lệ.')
+    throw new Error('Kích thước video không hợp lệ (chiều rộng/cao phải là số chẵn trong giới hạn hỗ trợ).')
   }
   if (typeof video.backgroundColor !== 'string' || !/^#[\da-f]{6}$/i.test(video.backgroundColor)) {
     throw new Error('Màu nền video không hợp lệ.')

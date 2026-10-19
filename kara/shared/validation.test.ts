@@ -28,9 +28,13 @@ describe('project JSON validation', () => {
     expect(parseProjectJson(JSON.stringify(custom)).video?.lyricPosition).toEqual({ x: 0.34, y: 0.67 })
   })
 
-  it('rejects positions outside the video frame', () => {
-    const custom = { ...project, video: { ...DEFAULT_VIDEO_SETTINGS, lyricPosition: { x: 1.1, y: 0.5 } } }
-    expect(() => parseProjectJson(JSON.stringify(custom))).toThrow('Vị trí lời bài hát')
+  it('preserves valid custom video output settings and rejects invalid dimensions', () => {
+    const custom = { ...project, video: { ...DEFAULT_VIDEO_SETTINGS, width: 1280, height: 720, backgroundColor: '#224466' } }
+    expect(parseProjectJson(JSON.stringify(custom)).video).toMatchObject(custom.video)
+    for (const [width, height] of [[15, 1080], [4000, 1080], [1920, 1081], [1920, 2200]]) {
+      const invalid = { ...project, video: { ...DEFAULT_VIDEO_SETTINGS, width, height } }
+      expect(() => parseProjectJson(JSON.stringify(invalid))).toThrow('Kích thước video')
+    }
   })
 
   it('rejects non-finite coordinates and invalid backgrounds', () => {

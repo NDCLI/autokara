@@ -20,9 +20,9 @@ Browser preview supports local audio/lyrics import, manual timing edits, demo ti
 
 ## Preview and render video
 
-The preview follows the same HTML audio clock used by the transport. It highlights the active lyric line and, when word timing exists, the current word. The lyric anchor is normalized to the video frame, so its position remains consistent between the preview and the generated ASS subtitles.
+The preview follows the same HTML audio clock used by the transport. It highlights the active lyric line and, when word timing exists, the current word. The lyric anchor is normalized to the video frame, so its position remains consistent between the preview and the generated ASS subtitles. The preview also exposes output resolution presets/custom dimensions and the background color used for generated backgrounds and video padding.
 
-In the desktop app, choose **Render video**, then choose an MP4 output path. The full-song audio is preferred; the beat is used only when no full-song asset exists. The render panel reports FFmpeg progress, allows cancellation, cleans temporary files on cancellation/failure, and plays the completed MP4 inside the app.
+Import a video from **Hình nền** to use it as the render background. If that video contains an audio stream and no full-song or beat track is imported, Kara Studio uses the video's audio for playback and rendering; an imported full-song track takes precedence over the video's audio. When a video has no usable audio, import a separate audio track before rendering.
 
 Rendering uses the configured frame size and background, burns ASS karaoke subtitles, and encodes H.264 video with AAC audio in a fast-start MP4. A missing FFmpeg executable or required `subtitles`, `libx264`, or `aac` capability is reported as a safe application error rather than executing a fallback download.
 
@@ -49,7 +49,15 @@ The unpacked app is written under `release/KaraStudio-win32-x64`. `electron-pack
 
 ## Recognition providers
 
-The offline demo never sends audio. Deepgram and compatible custom HTTP JSON providers run through Electron's main process; API keys are stored outside project files and encrypted with Electron `safeStorage` when available. A custom endpoint receives the selected audio bytes as `application/octet-stream` and should return a JSON object with a `segments` array:
+The offline demo never sends audio. **Whisper local** runs Faster-Whisper in a separate Python worker and returns word-level timestamps from the imported full audio; it does not separate vocals, use UVR/MDX models, or require an API key. The worker currently expects Python 3 plus `faster-whisper` to be installed and can use a model name (`tiny`, `base`, `small`, or `medium`) or a local model directory. For a development setup:
+
+```bash
+python -m pip install faster-whisper
+```
+
+Select **Whisper local** in Recognition settings, choose the language (for Vietnamese use `vi`), and run **Căn timestamp local**. The first model load may download several hundred MB to the Faster-Whisper/Hugging Face cache. For a packaged offline deployment, provide a verified Python/worker runtime and model separately; the current Electron package intentionally does not embed multi-GB model weights. If the runtime or model is missing, the app reports that explicitly instead of falling back to fake timestamps.
+
+Deepgram and compatible custom HTTP JSON providers run through Electron's main process; API keys are stored outside project files and encrypted with Electron `safeStorage` when available. A custom endpoint receives the selected audio bytes as `application/octet-stream` and should return a JSON object with a `segments` array:
 
 ```json
 {

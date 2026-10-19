@@ -3,10 +3,12 @@ import type { ChangeEvent, CSSProperties, PointerEvent as ReactPointerEvent } fr
 import { DEFAULT_EXPORT_OPTIONS, DEFAULT_PROVIDER, DEFAULT_VIDEO_SETTINGS, SPEAKER_COLORS, type ExportFormat, type KaraProject, type LyricSegment, type MediaAsset, type MediaKind, type NormalizedPosition, type NormalizedTranscript, type ProviderKind, type ProviderProfile, type RenderProgress, type RenderRequest, type SpeakerRole } from '../shared/contracts'
 import { parseProjectJson } from '../shared/validation'
 import { alignLyrics, lyricsToSegments, parseLyrics } from './lib/lyrics/parse'
+import { alignTranscriptToLyrics } from './lib/lyrics/autoAlign'
 import { buildAss, buildSrt } from './lib/export/subtitles'
 import { formatClock, formatTimecode, parseTimecode } from './lib/timecode'
 import { createHistory, projectReducer } from './state/projectReducer'
 import { createDemoSegments, createNewProject } from './state/projectFactory'
+import { finishWordRecording, markWord, startWordRecording as createWordRecordingSession, type WordRecordingSession } from './lib/lyrics/recording'
 import VideoPreview from './components/VideoPreview'
 
 const makeId = () => globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -82,9 +84,11 @@ function App() {
   const [audioError, setAudioError] = useState('')
   const [browserImportKind, setBrowserImportKind] = useState<MediaKind>('full')
   const [renderState, setRenderState] = useState<RenderState>({ jobId: '', status: 'idle', percent: 0, message: '' })
+  const [wordRecording, setWordRecording] = useState<WordRecordingSession | null>(null)
   const cancelRenderRef = useRef(false)
+  const wordRecordingRef = useRef<WordRecordingSession | null>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
-  const backgroundVideoRef = useRef<HTMLVideoElement>(null)
+  const videoAudioRef = useRef<HTMLVideoElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const rulerRef = useRef<HTMLDivElement>(null)
   const autosaveRef = useRef<number | null>(null)
@@ -95,12 +99,19 @@ function App() {
   const lyricsAsset = project.assets.find((asset) => asset.kind === 'lyrics')
   const previewBackgroundUrl = backgroundUrl ?? backgroundAsset?.url
   const activeAsset = activeKind === 'full' ? fullAsset : beatAsset
+  const videoProvidesAudio = !fullAsset && !beatAsset && Boolean(previewBackgroundUrl)
   const renderAsset = fullAsset ?? beatAsset
+  const renderAudioPath = renderAsset?.path ?? (videoProvidesAudio ? backgroundAsset?.path : undefined)
+  const renderAudioDuration = renderAsset?.duration ?? assetDurations[renderAsset?.id ?? ''] ?? (backgroundAsset ? assetDurations[backgroundAsset.id] : undefined)
   const selected = project.segments.find((segment) => segment.id === selectedId) ?? project.segments[0]
   const videoSettings = project.video ?? DEFAULT_VIDEO_SETTINGS
   const maxTime = Math.max(duration, ...project.segments.map((segment) => segment.end), 20)
   const sortedSegments = useMemo(() => [...project.segments].sort((a, b) => a.start - b.start), [project.segments])
   const completedCount = project.segments.filter((segment) => !segment.needsReview).length
+
+  useEffect(() => {
+    wordRecordingRef.current = wordRecording
+  }, [wordRecording])
 
   useEffect(() => {
     if (!window.kara) return
@@ -127,15 +138,37 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!playing) return
-    const timer = window.setInterval(() => {
-      const audio = audioRef.current
-      if (!audio) return
-      setPosition(audio.currentTime)
-      if (audio.ended) setPlaying(false)
-    }, 80)
-    return () => window.clearInterval(timer)
-  }, [playing])
+    if (!videoProvidesAudio) return
+    const video = videoAudioRef.current
+    if (!video) return
+    if (playing && video.paused) void video.play().catch(() => setAudioError('Trình duyệt không thể phát audio trong video này.'))
+    if (!playing && !video.paused) video.pause()
+  }, [playing, videoProvidesAudio])
+
+  useEffect(() => {
+    if (!videoProvidesAudio || !videoAudioRef.current) return
+    const video = videoAudioRef.current
+    const onMetadata = () => {
+      const nextDuration = Number.isFinite(video.duration) ? video.duration : 0
+      setDuration(nextDuration)
+      if (backgroundAsset) setAssetDurations((current) => ({ ...current, [backgroundAsset.id]: nextDuration }))
+    }
+    video.addEventListener('loadedmetadata', onMetadata)
+    return () => video.removeEventListener('loadedmetadata', onMetadata)
+  }, [backgroundAsset, videoProvidesAudio])
+
+  useEffect(() => {
+    const video = videoAudioRef.current
+    if (!videoProvidesAudio || !video || !playing) return
+    const onTimeUpdate = () => setPosition(video.currentTime)
+    const onEnded = () => setPlaying(false)
+    video.addEventListener('timeupdate', onTimeUpdate)
+    video.addEventListener('ended', onEnded)
+    return () => {
+      video.removeEventListener('timeupdate', onTimeUpdate)
+      video.removeEventListener('ended', onEnded)
+    }
+  }, [playing, videoProvidesAudio])
 
   useEffect(() => {
     if (!drag) return
@@ -293,23 +326,28 @@ function App() {
   }
 
   function togglePlay() {
-    const audio = audioRef.current
-    if (!audio) {
-      notify('Nhập bản đầy đủ hoặc beat để phát audio.')
+    const media = activeAsset?.url ? audioRef.current : videoProvidesAudio ? videoAudioRef.current : null
+    if (!media) {
+      notify('Nhập bản đầy đủ, beat hoặc video có audio để phát.')
       return
     }
     if (playing) {
-      audio.pause()
+      media.pause()
       setPlaying(false)
     } else {
-      void audio.play().then(() => setPlaying(true)).catch(() => setAudioError('Trình duyệt không thể phát định dạng audio này.'))
+      void media.play().then(() => setPlaying(true)).catch(() => setAudioError('Trình duyệt không thể phát định dạng media này.'))
     }
   }
 
   function seekTo(value: number) {
+    if (wordRecordingRef.current) {
+      notify('Đang căn từ: hãy bấm từ kế tiếp, không tua beat.')
+      return
+    }
     const safe = Math.max(0, Math.min(maxTime, value))
     setPosition(safe)
     if (audioRef.current) audioRef.current.currentTime = safe
+    if (videoAudioRef.current) videoAudioRef.current.currentTime = safe
   }
 
   function changeSegment(id: string, patch: Partial<LyricSegment>) {
@@ -405,7 +443,7 @@ function App() {
         transcript = await window.kara.transcribe(providerProfile, fullAsset.path, lyricsText)
       }
       const lines = lyricsRaw ? parseLyrics(lyricsRaw, lyricsAsset?.displayName) : []
-      const nextSegments = lines.length ? alignLyrics(lines, transcript) : transcript.segments.map((segment) => ({ ...segment, speakerRole: segment.speakerId?.includes('1') ? 'female' as const : segment.speakerId ? 'male' as const : 'unknown' as const, providerSpeakerId: segment.speakerId, needsReview: (segment.confidence ?? 1) < 0.68 }))
+      const nextSegments = lines.length ? (providerProfile.kind === 'local' ? alignTranscriptToLyrics(lines, transcript) : alignLyrics(lines, transcript)) : transcript.segments.map((segment) => ({ ...segment, speakerRole: segment.speakerId?.includes('1') ? 'female' as const : segment.speakerId ? 'male' as const : 'unknown' as const, providerSpeakerId: segment.speakerId, needsReview: (segment.confidence ?? 1) < 0.68 }))
       dispatch({ type: 'set-segments', segments: nextSegments })
       setSelectedId(nextSegments[0]?.id ?? '')
       notify(`${nextSegments.length} dòng đã sẵn sàng chỉnh sửa.`)
@@ -452,13 +490,13 @@ function App() {
       setRenderState({ jobId: '', status: 'error', percent: 0, message: '', error: 'Render MP4 chỉ khả dụng trong ứng dụng desktop.' })
       return
     }
-    if (!renderAsset) {
+    if (!renderAudioPath) {
       setModal('render')
-      setRenderState({ jobId: '', status: 'error', percent: 0, message: '', error: 'Hãy nhập bản đầy đủ hoặc beat trước khi render.' })
+      setRenderState({ jobId: '', status: 'error', percent: 0, message: '', error: 'Hãy nhập audio hoặc video có audio trước khi render.' })
       return
     }
     const jobId = `render-${makeId()}`
-    const renderDuration = Math.max(renderAsset.duration ?? 0, renderAsset.id === activeAsset?.id ? duration : 0, ...sortedSegments.map((segment) => segment.end), 0)
+    const renderDuration = Math.max(renderAudioDuration ?? 0, renderAsset?.id === activeAsset?.id ? duration : 0, !renderAsset ? duration : 0, ...sortedSegments.map((segment) => segment.end), 0)
     if (!renderDuration) {
       setModal('render')
       setRenderState({ jobId: '', status: 'error', percent: 0, message: '', error: 'Chưa xác định được thời lượng audio. Hãy phát audio hoặc thêm timing lời trước khi render.' })
@@ -466,7 +504,7 @@ function App() {
     }
     const request: RenderRequest = {
       jobId,
-      audioPath: renderAsset.path,
+      audioPath: renderAudioPath ?? '',
       backgroundPath: backgroundAsset?.path,
       assContent: buildAss(sortedSegments, project.exportOptions, videoSettings),
       duration: renderDuration,
@@ -477,18 +515,16 @@ function App() {
     setRenderState({ jobId, status: 'running', percent: 0, message: 'Đang chuẩn bị render…' })
     try {
       const result = await window.kara.startRender(request)
-      if (cancelRenderRef.current || !result) {
+      if (!result) {
         setRenderState((current) => current.jobId === jobId ? { ...current, status: 'canceled', message: 'Đã hủy render.' } : current)
         return
       }
       const outputUrl = await window.kara.getMediaUrl(result.path)
       setRenderState((current) => current.jobId === jobId ? { ...current, status: 'done', percent: 100, message: 'Video đã render xong.', outputPath: result.path, outputUrl } : current)
     } catch (error) {
-      if (cancelRenderRef.current) {
-        setRenderState((current) => current.jobId === jobId ? { ...current, status: 'canceled', message: 'Đã hủy render.' } : current)
-      } else {
-        setRenderState((current) => current.jobId === jobId ? { ...current, status: 'error', message: '', error: error instanceof Error ? error.message : 'Không thể render video.' } : current)
-      }
+      setRenderState((current) => current.jobId === jobId
+        ? { ...current, status: 'error', message: '', error: error instanceof Error ? error.message : 'Không thể render video.' }
+        : current)
     }
   }
 
@@ -508,10 +544,54 @@ function App() {
     setRenderState({ jobId: '', status: 'idle', percent: 0, message: '' })
   }
 
+  function activeMedia(): HTMLMediaElement | null {
+    if (activeAsset?.url) return audioRef.current
+    if (videoProvidesAudio) return videoAudioRef.current
+    return null
+  }
+
+  function startWordRecording() {
+    if (!selected) return
+    const media = activeMedia()
+    if (!media) return notify('Hãy nhập audio hoặc video có audio trước khi căn từ.')
+    const session = createWordRecordingSession(selected)
+    if (activeKind !== 'beat' && beatAsset) return notify('Hãy chọn Beat làm track đang nghe trước khi căn từ.')
+    seekTo(selected.start)
+    wordRecordingRef.current = session
+    setWordRecording(session)
+    dispatch({ type: 'update-segment', id: session.segmentId, patch: { words: session.words, needsReview: true } })
+    void media.play().then(() => setPlaying(true)).catch(() => notify('Không thể phát beat để căn từ.'))
+  }
+
+  function stopWordRecording(discard = false) {
+    const session = wordRecordingRef.current
+    if (!session) return
+    if (discard) {
+      dispatch({ type: 'update-segment', id: session.segmentId, patch: { words: session.originalWords, start: session.originalStart, end: session.originalEnd, needsReview: session.originalNeedsReview } })
+    } else if (session.nextIndex > 0) {
+      dispatch({ type: 'update-segment', id: session.segmentId, patch: { words: finishWordRecording(session), needsReview: session.nextIndex < session.words.length } })
+    }
+    wordRecordingRef.current = null
+    setWordRecording(null)
+  }
+
+  function markSelectedWord(wordIndex: number) {
+    const session = wordRecordingRef.current
+    if (!session || wordIndex !== session.nextIndex) return
+    const media = activeMedia()
+    if (!media || media.paused) return notify('Hãy để beat đang phát rồi bấm đúng từ kế tiếp.')
+    const next = markWord(session, media.currentTime)
+    if (!next) return notify('Mốc từ phải tăng dần trong khoảng của dòng lời.')
+    wordRecordingRef.current = next
+    setWordRecording(next)
+    dispatch({ type: 'update-segment', id: next.segmentId, patch: { words: next.words, needsReview: next.nextIndex < next.words.length } })
+    if (next.nextIndex >= next.words.length) stopWordRecording()
+  }
+
+
   function setLyricPosition(nextPosition: NormalizedPosition) {
     dispatch({ type: 'set-video-settings', settings: { lyricPosition: nextPosition } })
   }
-
   function updateTimeField(id: string, key: 'start' | 'end', text: string) {
     const parsed = parseTimecode(text)
     if (parsed !== null) changeSegment(id, key === 'start'
@@ -524,6 +604,7 @@ function App() {
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable) return
     if (event.code === 'Space') {
       event.preventDefault()
+      if (wordRecordingRef.current) return
       togglePlay()
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
@@ -534,8 +615,8 @@ function App() {
       event.preventDefault()
       void saveProject()
     }
-    if (event.key === 'ArrowLeft') seekTo(position - (event.shiftKey ? 1 : 0.1))
-    if (event.key === 'ArrowRight') seekTo(position + (event.shiftKey ? 1 : 0.1))
+    if (!wordRecordingRef.current && event.key === 'ArrowLeft') seekTo(position - (event.shiftKey ? 1 : 0.1))
+    if (!wordRecordingRef.current && event.key === 'ArrowRight') seekTo(position + (event.shiftKey ? 1 : 0.1))
   }
 
   const rulerStyle = (segment: LyricSegment): CSSProperties => ({
@@ -587,7 +668,7 @@ function App() {
           <div className="source-spacer" />
           <div className="provider-mini">
             <span className="provider-mini-icon"><Icon name="mic" size={15} /></span>
-            <div><small>NHẬN DẠNG</small><strong>{providerProfile.kind === 'mock' ? 'Demo offline' : providerProfile.kind === 'deepgram' ? 'Deepgram' : 'Custom API'}</strong></div>
+            <div><small>NHẬN DẠNG</small><strong>{providerProfile.kind === 'mock' ? 'Demo offline' : providerProfile.kind === 'local' ? 'Whisper local' : providerProfile.kind === 'deepgram' ? 'Deepgram' : 'Custom API'}</strong></div>
             <button className="tiny-icon" title="Cấu hình" onClick={() => setModal('provider')}><Icon name="more" size={17} /></button>
           </div>
         </aside>
@@ -597,7 +678,7 @@ function App() {
             <div className="transport-topline">
               <div className="transport-current">
                 <span className={`track-indicator ${activeKind}`}><Icon name="music" size={14} /></span>
-                <div><strong>{activeAsset?.displayName ?? 'Chưa có audio'}</strong><small>{activeAsset ? activeKind === 'full' ? 'BẢN ĐẦY ĐỦ' : 'BEAT / INSTRUMENTAL' : 'Nhập audio để nghe và căn lời'}</small></div>
+                <div><strong>{activeAsset?.displayName ?? (videoProvidesAudio ? backgroundAsset?.displayName : undefined) ?? 'Chưa có audio'}</strong><small>{activeAsset ? activeKind === 'full' ? 'BẢN ĐẦY ĐỦ' : 'BEAT / INSTRUMENTAL' : videoProvidesAudio ? 'AUDIO TRONG VIDEO NỀN' : 'Nhập audio để nghe và căn lời'}</small></div>
               </div>
               <div className="transport-controls">
                 <button className="transport-skip" title="Lùi 5 giây" onClick={() => seekTo(position - 5)}><Icon name="back" /></button>
@@ -618,29 +699,36 @@ function App() {
                 })}</div>
                 <div className="wave-progress" style={{ width: `${position / maxTime * 100}%` }} />
                 <div className="playhead" style={{ left: `${position / maxTime * 100}%` }}><span /></div>
-                {!activeAsset && <div className="wave-empty-label">Nhập bản đầy đủ hoặc beat để hiển thị waveform</div>}
+                {!activeAsset && !videoProvidesAudio && <div className="wave-empty-label">Nhập bản đầy đủ, beat hoặc video có audio để phát</div>}
               </div>
               <div className="wave-footnote"><span><i className="legend-full" />{activeKind === 'full' ? 'Bản đầy đủ' : 'Beat đang nghe'}</span><button onClick={() => setActiveKind(activeKind === 'full' ? 'beat' : 'full')} disabled={!fullAsset && !beatAsset}>Đổi track <span>⇄</span></button></div>
             </div>
             {audioError && <div className="audio-error"><Icon name="warning" size={14} />{audioError}</div>}
-            {activeAsset?.url && <audio ref={audioRef} src={activeAsset.url} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration || 0); setAudioError('') }} onTimeUpdate={(event) => setPosition(event.currentTarget.currentTime)} onEnded={() => setPlaying(false)} onError={() => setAudioError('Không đọc được audio. Hãy thử MP3, WAV, M4A, FLAC hoặc OGG.')} />}
+            {activeAsset?.url && <audio ref={audioRef} src={activeAsset.url} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration || 0); setAudioError('') }} onTimeUpdate={(event) => setPosition(event.currentTarget.currentTime)} onEnded={() => { setPlaying(false); if (wordRecordingRef.current) stopWordRecording() }} onError={() => setAudioError('Không đọc được audio. Hãy thử MP3, WAV, M4A, FLAC hoặc OGG.')} />}
+            {videoProvidesAudio && previewBackgroundUrl && <video ref={videoAudioRef} className="video-audio-source" src={previewBackgroundUrl} preload="metadata" onLoadedMetadata={(event) => { const value = event.currentTarget.duration || 0; setDuration(value); if (backgroundAsset) setAssetDurations((current) => ({ ...current, [backgroundAsset.id]: value })) }} onTimeUpdate={(event) => { if (playing) setPosition(event.currentTarget.currentTime) }} onEnded={() => { setPlaying(false); if (wordRecordingRef.current) stopWordRecording() }} onError={() => setAudioError('Không đọc được audio trong video nền.')} />}
           </section>
 
           <VideoPreview
             segments={sortedSegments}
             time={position}
-            audioAvailable={Boolean(activeAsset?.url)}
+            audioAvailable={Boolean(activeAsset?.url || previewBackgroundUrl)}
             settings={videoSettings}
             backgroundUrl={previewBackgroundUrl}
             playing={playing}
             onPositionChange={setLyricPosition}
+            onSettingsChange={(settings) => dispatch({ type: 'set-video-settings', settings })}
+            onBackgroundError={(message) => setAudioError(message)}
+            onBackgroundDurationChange={(value) => {
+              if (backgroundAsset) setAssetDurations((current) => ({ ...current, [backgroundAsset.id]: value }))
+              if (!activeAsset && value > 0) setDuration(value)
+            }}
           />
 
           <div className="timeline-heading">
             <div><div className="section-title">Lời & thời gian</div><p>Kéo mép dòng để căn nhịp · chọn một dòng để sửa</p></div>
             <div className="timeline-actions">
               <span className="review-status"><span className="review-dot" />{completedCount}/{project.segments.length} đã rà soát</span>
-              <button className="button button-quiet button-small" onClick={() => void transcribe()} disabled={busy}><Icon name="mic" size={15} />{busy ? 'Đang xử lý…' : providerProfile.kind === 'mock' ? 'Tạo timing demo' : 'Nhận dạng audio'}</button>
+              <button className="button button-quiet button-small" onClick={() => void transcribe()} disabled={busy}><Icon name="mic" size={15} />{busy ? 'Đang xử lý…' : providerProfile.kind === 'mock' ? 'Tạo timing demo' : providerProfile.kind === 'local' ? 'Căn timestamp local' : 'Nhận dạng audio'}</button>
               <button className="button button-small button-add" onClick={addSegment}><Icon name="plus" size={15} />Dòng lời</button>
             </div>
           </div>
@@ -709,8 +797,12 @@ function App() {
               {selected.providerSpeakerId && <div className="speaker-origin">API gán: <strong>{selected.providerSpeakerId}</strong></div>}
             </section>
             <section className="inspector-section word-section">
-              <div className="field-label">Timing từng từ <span>{selected.words.length || '—'}</span></div>
-              {selected.words.length ? <div className="word-list">{selected.words.map((word, index) => <button className="word-chip" key={word.id} title={`${formatTimecode(word.start)} – ${formatTimecode(word.end)}`} onClick={() => seekTo(word.start)}><span>{word.text}</span><small>{formatClock(word.start)}</small>{word.confidence !== undefined && <i style={{ opacity: Math.max(0.3, word.confidence) }} />}</button>)}</div> : <div className="word-empty">Chưa có timing cấp từ.<br />Chạy nhận dạng hoặc chỉnh mốc dòng bên trên.</div>}
+              <div className="field-label"><span>Timing từng từ</span><span>{selected.words.length || '—'}</span></div>
+              <div className="word-recording-toolbar">
+                {!wordRecording ? <button className="button button-quiet button-small" onClick={startWordRecording} disabled={!selected.words.length && !selected.text.trim()}><Icon name="mic" size={14} />Căn từ theo beat</button> : <><strong>{wordRecording.nextIndex}/{wordRecording.words.length} từ</strong><button className="button button-small button-danger" onClick={() => stopWordRecording(true)}>Hủy</button><button className="button button-small button-quiet" onClick={() => stopWordRecording()}>Dừng</button></>}
+              </div>
+              {wordRecording && <p className="word-recording-hint">Beat đang chạy. Bấm đúng từ kế tiếp để chấm mốc hiện tại.</p>}
+              {selected.words.length ? <div className="word-list">{selected.words.map((word, index) => <button className={`word-chip ${wordRecording && index === wordRecording.nextIndex ? 'is-recording-target' : ''} ${wordRecording && index < wordRecording.nextIndex ? 'is-recorded' : ''}`} key={word.id} title={`${formatTimecode(word.start)} – ${formatTimecode(word.end)}`} onClick={() => wordRecording ? markSelectedWord(index) : seekTo(word.start)} disabled={Boolean(wordRecording && index !== wordRecording.nextIndex)}><span>{word.text}</span><small>{formatClock(word.start)}</small>{word.confidence !== undefined && <i style={{ opacity: Math.max(0.3, word.confidence) }} />}</button>)}</div> : <div className="word-empty">Chưa có timing cấp từ.<br />Bấm “Căn từ theo beat” để tạo và chấm từng từ.</div>}
             </section>
             <section className="inspector-section quality-section">
               <div className="quality-label"><span>ĐỘ TIN CẬY</span><strong>{selected.confidence === undefined ? 'Chưa có dữ liệu' : `${Math.round(selected.confidence * 100)}%`}</strong></div>
@@ -732,9 +824,14 @@ function App() {
           <div className="dialog-body">
             <label className="field-label" htmlFor="provider-kind">Dịch vụ</label>
             <div className="provider-options">
-              {([{ kind: 'mock', label: 'Demo offline', detail: 'Tạo timing mẫu, không gửi audio' }, { kind: 'deepgram', label: 'Deepgram', detail: 'Word timing và speaker diarization' }, { kind: 'custom', label: 'API tương thích', detail: 'Endpoint trả JSON đã chuẩn hóa' }] as Array<{ kind: ProviderKind; label: string; detail: string }>).map((option) => <button key={option.kind} className={`provider-option ${providerProfile.kind === option.kind ? 'active' : ''}`} onClick={() => setProviderProfile({ ...providerProfile, kind: option.kind })}><span className="provider-radio" /><span><strong>{option.label}</strong><small>{option.detail}</small></span></button>)}
+              {([{ kind: 'mock', label: 'Demo offline', detail: 'Tạo timing mẫu, không gửi audio' }, { kind: 'local', label: 'Whisper local', detail: 'Timestamp từng từ, chạy trên máy và không cần API' }, { kind: 'deepgram', label: 'Deepgram', detail: 'Word timing và speaker diarization' }, { kind: 'custom', label: 'API tương thích', detail: 'Endpoint trả JSON đã chuẩn hóa' }] as Array<{ kind: ProviderKind; label: string; detail: string }>).map((option) => <button key={option.kind} className={`provider-option ${providerProfile.kind === option.kind ? 'active' : ''}`} onClick={() => setProviderProfile({ ...providerProfile, kind: option.kind, model: option.kind === 'local' && !['tiny', 'base', 'small', 'medium'].includes(providerProfile.model) ? 'small' : providerProfile.model })}><span className="provider-radio" /><span><strong>{option.label}</strong><small>{option.detail}</small></span></button>)}
             </div>
-            {providerProfile.kind !== 'mock' && <>
+            {providerProfile.kind === 'local' && <>
+              <div className="form-grid"><label><span className="field-label">Model Whisper</span><select className="text-input" value={providerProfile.model} onChange={(event) => setProviderProfile({ ...providerProfile, model: event.target.value })}><option value="tiny">tiny · nhanh, nhẹ</option><option value="base">base · cân bằng</option><option value="small">small · chính xác hơn</option><option value="medium">medium · tốt hơn, chậm hơn</option></select></label><label><span className="field-label">Ngôn ngữ</span><input className="text-input" value={providerProfile.language} onChange={(event) => setProviderProfile({ ...providerProfile, language: event.target.value })} placeholder="vi" /></label></div>
+              <label className="field-label" htmlFor="local-model-path">Thư mục model (tuỳ chọn)</label><input id="local-model-path" className="text-input" value={providerProfile.localModelPath ?? ''} onChange={(event) => setProviderProfile({ ...providerProfile, localModelPath: event.target.value || undefined })} placeholder="Để trống để Faster-Whisper tự tìm/tải model" />
+              <p className="form-hint">Chạy offline sau khi model đã có trên máy. Kara Studio không dùng model UVR/MDX tách nhạc; lần đầu có thể cần cài Python + faster-whisper và tải model.</p>
+            </>}
+            {providerProfile.kind !== 'mock' && providerProfile.kind !== 'local' && <>
               <label className="field-label" htmlFor="provider-endpoint">Endpoint</label>
               <input id="provider-endpoint" className="text-input" value={providerProfile.endpoint} onChange={(event) => setProviderProfile({ ...providerProfile, endpoint: event.target.value })} placeholder="https://api.example.com/v1/listen" />
               <div className="form-grid"><label><span className="field-label">Model</span><input className="text-input" value={providerProfile.model} onChange={(event) => setProviderProfile({ ...providerProfile, model: event.target.value })} /></label><label><span className="field-label">Ngôn ngữ</span><input className="text-input" value={providerProfile.language} onChange={(event) => setProviderProfile({ ...providerProfile, language: event.target.value })} /></label></div>
@@ -745,7 +842,7 @@ function App() {
               <div className="security-note"><Icon name="check" size={14} /><span>API key được mã hóa trong app data; không nằm trong file project.</span></div>
             </>}
             {providerProfile.kind === 'mock' && <div className="mock-note"><span className="mock-spark">✳</span><div><strong>Chỉnh lời mà không cần API</strong><p>Demo tạo mốc từ lời hiện có, để bạn thử timeline offline. Đây không phải kết quả nhận dạng giọng thật.</p></div></div>}
-            {!window.kara && providerProfile.kind !== 'mock' && <div className="warning-note">Chạy trong desktop app để gửi audio an toàn; browser preview chỉ dùng được Demo offline.</div>}
+            {!window.kara && providerProfile.kind !== 'mock' && <div className="warning-note">Chạy trong desktop app để dùng timestamp local hoặc gửi audio cloud; browser preview chỉ dùng được Demo offline.</div>}
           </div>
           <div className="dialog-footer"><button className="button button-quiet" onClick={() => { setModal(null); setApiKey('') }}>Hủy</button><button className="button button-accent" onClick={() => void saveProviderSettings()}>Lưu cấu hình</button></div>
         </section>
@@ -769,14 +866,14 @@ function App() {
           <div className="dialog-heading"><div><span className="dialog-icon render-dialog-icon"><Icon name="video" /></span><div><h2 id="render-title">Render video karaoke</h2><p>Xuất video MP4 {videoSettings.width} × {videoSettings.height} với lời đã căn timing.</p></div></div><button className="tiny-icon" onClick={() => { if (renderState.status !== 'running' && renderState.status !== 'canceling') setModal(null) }} aria-label="Đóng" disabled={renderState.status === 'running' || renderState.status === 'canceling'}><Icon name="close" /></button></div>
           <div className="dialog-body render-body">
             {!window.kara && <div className="desktop-only-note"><Icon name="warning" size={17} /><div><strong>Render cần ứng dụng desktop</strong><p>Browser vẫn dùng được preview, kéo vị trí chữ và chỉnh timing. Hãy mở Kara Studio bản Windows để tạo MP4 bằng FFmpeg.</p></div></div>}
-            <div className="render-summary"><div><span>Nguồn audio</span><strong>{renderAsset?.displayName ?? 'Chưa có audio'}</strong><small>{fullAsset ? 'Ưu tiên bản đầy đủ' : beatAsset ? 'Dùng beat thay thế' : 'Nhập một file audio'}</small></div><div><span>Hình nền</span><strong>{backgroundAsset?.displayName ?? 'Màu nền'}</strong><small>{backgroundAsset ? `Video lặp theo audio · padding ${videoSettings.backgroundColor}` : videoSettings.backgroundColor}</small></div><div><span>Khung hình</span><strong>{videoSettings.width} × {videoSettings.height}</strong><small>Vị trí lời {Math.round(videoSettings.lyricPosition.x * 100)}% · {Math.round(videoSettings.lyricPosition.y * 100)}%</small></div></div>
+            <div className="render-summary"><div><span>Nguồn audio</span><strong>{renderAsset?.displayName ?? backgroundAsset?.displayName ?? 'Chưa có audio/video'}</strong><small>{renderAsset ? fullAsset ? 'Ưu tiên bản đầy đủ' : 'Dùng beat thay thế' : backgroundAsset ? videoProvidesAudio ? 'Dùng audio của video nền' : 'Video nền đã tắt tiếng, cần thêm audio' : 'Nhập audio hoặc video có audio'}</small></div><div><span>Hình nền</span><strong>{backgroundAsset?.displayName ?? 'Màu nền'}</strong><small>{backgroundAsset ? `Video nền được lặp và căn khung · padding ${videoSettings.backgroundColor}` : videoSettings.backgroundColor}</small></div><div><span>Khung hình</span><strong>{videoSettings.width} × {videoSettings.height}</strong><small>Vị trí lời {Math.round(videoSettings.lyricPosition.x * 100)}% · {Math.round(videoSettings.lyricPosition.y * 100)}%</small></div></div>
             {(renderState.status === 'running' || renderState.status === 'canceling') && <div className="render-progress-panel"><div className="render-progress-heading"><strong>{renderState.status === 'canceling' ? 'Đang hủy…' : 'Đang render video'}</strong><span>{renderState.percent}%</span></div><div className="render-progress-track"><i style={{ width: `${Math.max(0, Math.min(100, renderState.percent))}%` }} /></div><p>{renderState.message || 'Đang chuẩn bị…'}</p></div>}
             {renderState.status === 'error' && <div className="render-error"><Icon name="warning" size={17} /><div><strong>Không thể render video</strong><p>{renderState.error}</p></div></div>}
             {renderState.status === 'canceled' && <div className="render-canceled"><strong>Render đã hủy</strong><p>File tạm đã được dọn dẹp; project và timing của bạn vẫn giữ nguyên.</p></div>}
             {renderState.status === 'done' && renderState.outputUrl && <div className="render-result"><div className="render-result-heading"><div><strong>Video đã sẵn sàng</strong><span>{renderState.outputPath?.split(/[\\/]/).pop()}</span></div><span className="render-complete-mark"><Icon name="check" size={14} /></span></div><video className="render-result-video" controls preload="metadata" src={renderState.outputUrl}>Trình duyệt không hỗ trợ phát video.</video></div>}
             {renderState.status === 'idle' && <p className="render-help">Kara Studio sẽ dùng bản đầy đủ nếu có; nếu không, app sẽ render bằng beat. Subtitle ASS được tạo từ timing hiện tại và vị trí chữ đang lưu.</p>}
           </div>
-          <div className="dialog-footer render-dialog-footer">{renderState.status === 'done' || renderState.status === 'error' || renderState.status === 'canceled' ? <button className="button button-quiet" onClick={resetRender}>Render lại</button> : null}<button className="button button-quiet" onClick={() => { if (renderState.status !== 'running' && renderState.status !== 'canceling') setModal(null) }} disabled={renderState.status === 'running' || renderState.status === 'canceling'}>{renderState.status === 'done' ? 'Đóng' : 'Hủy'}</button>{renderState.status === 'running' || renderState.status === 'canceling' ? <button className="button button-danger" onClick={() => void cancelRender()} disabled={renderState.status === 'canceling'}>Hủy render</button> : renderState.status !== 'done' && <button className="button button-accent" onClick={() => void startRender()} disabled={!window.kara || !renderAsset}>Bắt đầu render</button>}</div>
+          <div className="dialog-footer render-dialog-footer">{renderState.status === 'done' || renderState.status === 'error' || renderState.status === 'canceled' ? <button className="button button-quiet" onClick={resetRender}>Render lại</button> : null}<button className="button button-quiet" onClick={() => { if (renderState.status !== 'running' && renderState.status !== 'canceling') setModal(null) }} disabled={renderState.status === 'running' || renderState.status === 'canceling'}>{renderState.status === 'done' ? 'Đóng' : 'Hủy'}</button>{renderState.status === 'running' || renderState.status === 'canceling' ? <button className="button button-danger" onClick={() => void cancelRender()} disabled={renderState.status === 'canceling'}>Hủy render</button> : renderState.status !== 'done' && <button className="button button-accent" onClick={() => void startRender()} disabled={!window.kara || !renderAudioPath}>Bắt đầu render</button>}</div>
         </section>
       </div>}
       {toast && <div className="toast"><Icon name="check" size={15} />{toast}</div>}

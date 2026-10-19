@@ -1,6 +1,6 @@
 export type MediaKind = 'full' | 'beat' | 'lyrics' | 'background'
 export type SpeakerRole = 'male' | 'female' | 'duet' | 'unknown'
-export type ProviderKind = 'mock' | 'deepgram' | 'custom'
+export type ProviderKind = 'mock' | 'local' | 'deepgram' | 'custom'
 export type ExportFormat = 'srt' | 'ass'
 
 export type TimedWord = {
@@ -46,6 +46,8 @@ export type ProviderProfile = {
   model: string
   language: string
   diarize: boolean
+  localModelPath?: string
+  localDevice?: 'auto' | 'cpu' | 'cuda'
   customSegmentsPath?: string
   customWordsPath?: string
 }

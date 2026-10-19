@@ -14,4 +14,14 @@ describe('video position project history', () => {
     const redone = projectReducer(undone, { type: 'redo' })
     expect(redone.present.video?.lyricPosition).toEqual({ x: 0.3, y: 0.6 })
   })
+
+  it('records output dimensions and background color for undo and redo', () => {
+    const initial = createHistory(createNewProject({ provider: DEFAULT_PROVIDER, exportOptions: DEFAULT_EXPORT_OPTIONS }))
+    const changed = projectReducer(initial, { type: 'set-video-settings', settings: { width: 1280, height: 720, backgroundColor: '#224466' } })
+    expect(changed.present.video).toMatchObject({ width: 1280, height: 720, backgroundColor: '#224466' })
+    const undone = projectReducer(changed, { type: 'undo' })
+    expect(undone.present.video).toMatchObject(DEFAULT_VIDEO_SETTINGS)
+    const redone = projectReducer(undone, { type: 'redo' })
+    expect(redone.present.video).toMatchObject({ width: 1280, height: 720, backgroundColor: '#224466' })
+  })
 })

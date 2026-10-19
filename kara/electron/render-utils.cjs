@@ -1,4 +1,6 @@
 const path = require('node:path')
+const fs = require('node:fs')
+const fsp = require('node:fs/promises')
 
 function escapeFilterPath(value) {
   return path.resolve(value)
@@ -10,8 +12,57 @@ function escapeFilterPath(value) {
     .replace(/\]/g, '\\]')
 }
 
+function comparablePath(value) {
+  const resolved = path.resolve(value)
+  try {
+    return fs.realpathSync.native(resolved).toLowerCase()
+  } catch {
+    return resolved.toLowerCase()
+  }
+}
+
+function assertOutputDoesNotMatchInputs(outputPath, audioPath, backgroundPath) {
+  const output = comparablePath(outputPath)
+  const inputs = [audioPath, backgroundPath].filter((value) => typeof value === 'string' && value.length > 0)
+  if (inputs.some((input) => comparablePath(input) === output)) {
+    throw new Error('File output không được trùng với file audio hoặc video nền.')
+  }
+}
+
+async function publishRenderOutput(tempPath, outputPath, { isCanceled = () => false } = {}) {
+  const backupPath = `${outputPath}.${process.pid}.${Date.now()}.kara-backup`
+  let backedUp = false
+  let published = false
+  try {
+    if (isCanceled()) return { status: 'canceled' }
+    try {
+      await fsp.rename(outputPath, backupPath)
+      backedUp = true
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    if (isCanceled()) {
+      if (backedUp) await fsp.rename(backupPath, outputPath)
+      return { status: 'canceled' }
+    }
+    await fsp.rename(tempPath, outputPath)
+    published = true
+    if (backedUp) await fsp.rm(backupPath, { force: true }).catch(() => {})
+    return { status: 'done', path: outputPath }
+  } catch (error) {
+    if (backedUp && !published) {
+      try {
+        await fsp.rename(backupPath, outputPath)
+      } catch (restoreError) {
+        error.restoreError = restoreError
+      }
+    }
+    throw error
+  }
+}
+
 function validateVideo(video) {
-  if (!video || !Number.isInteger(video.width) || !Number.isInteger(video.height) || video.width < 16 || video.height < 16) {
+  if (!video || !Number.isInteger(video.width) || !Number.isInteger(video.height) || video.width < 16 || video.height < 16 || video.width > 3840 || video.height > 2160 || video.width % 2 || video.height % 2) {
     throw new Error('Kích thước video không hợp lệ.')
   }
   if (typeof video.backgroundColor !== 'string' || !/^#[\da-f]{6}$/i.test(video.backgroundColor)) {
@@ -57,4 +108,4 @@ function parseProgressLine(line, duration) {
   return { percent, status: `Đang mã hóa · ${percent}%` }
 }
 
-module.exports = { buildFfmpegArgs, escapeFilterPath, parseProgressLine }
+module.exports = { assertOutputDoesNotMatchInputs, buildFfmpegArgs, escapeFilterPath, parseProgressLine, publishRenderOutput }
