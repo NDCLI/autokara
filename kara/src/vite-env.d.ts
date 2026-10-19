@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { ExportFormat, KaraProject, MediaKind, NormalizedTranscript, ProviderProfile } from '../shared/contracts'
+import type { ExportFormat, KaraProject, MediaKind, NormalizedTranscript, ProviderProfile, RenderProgress, RenderRequest, RenderResult } from '../shared/contracts'
 
 type PickedFile = { path: string; displayName: string; url?: string; mimeType?: string }
 type ProjectOpenResult = { path: string; project: KaraProject } | null
@@ -18,6 +18,9 @@ declare global {
       loadProviderSettings(): Promise<{ profile: ProviderProfile; apiKeyPresent: boolean }>
       saveProviderSettings(profile: ProviderProfile, apiKey: string): Promise<void>
       transcribe(profile: ProviderProfile, audioPath: string, lyricsText?: string): Promise<NormalizedTranscript>
+      startRender(request: RenderRequest): Promise<RenderResult>
+      onRenderProgress(listener: (progress: RenderProgress) => void): () => void
+      cancelRender(jobId: string): Promise<void>
     }
   }
 }

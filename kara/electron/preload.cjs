@@ -11,4 +11,11 @@ contextBridge.exposeInMainWorld('kara', {
   loadProviderSettings: () => ipcRenderer.invoke('load-provider-settings'),
   saveProviderSettings: (profile, apiKey) => ipcRenderer.invoke('save-provider-settings', profile, apiKey),
   transcribe: (profile, audioPath, lyricsText) => ipcRenderer.invoke('transcribe', profile, audioPath, lyricsText),
+  startRender: (request) => ipcRenderer.invoke('start-render', request),
+  onRenderProgress: (listener) => {
+    const handler = (_event, progress) => listener(progress)
+    ipcRenderer.on('render-progress', handler)
+    return () => ipcRenderer.removeListener('render-progress', handler)
+  },
+  cancelRender: (jobId) => ipcRenderer.invoke('cancel-render', jobId),
 })

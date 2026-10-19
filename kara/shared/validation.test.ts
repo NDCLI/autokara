@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_PROVIDER, type KaraProject } from './contracts'
+import { DEFAULT_PROVIDER, DEFAULT_VIDEO_SETTINGS, type KaraProject } from './contracts'
 import { parseProjectJson, serializeProject } from './validation'
 
 const project: KaraProject = {
@@ -15,8 +15,29 @@ const project: KaraProject = {
 }
 
 describe('project JSON validation', () => {
-  it('round-trips a valid project', () => {
-    expect(parseProjectJson(serializeProject(project))).toEqual(project)
+  it('round-trips a valid project and adds the default video layout', () => {
+    expect(parseProjectJson(serializeProject(project))).toEqual({ ...project, video: DEFAULT_VIDEO_SETTINGS })
+  })
+
+  it('normalizes legacy projects without video settings', () => {
+    expect(parseProjectJson(JSON.stringify(project)).video).toEqual(DEFAULT_VIDEO_SETTINGS)
+  })
+
+  it('preserves a valid custom lyric position', () => {
+    const custom = { ...project, video: { ...DEFAULT_VIDEO_SETTINGS, lyricPosition: { x: 0.34, y: 0.67 } } }
+    expect(parseProjectJson(JSON.stringify(custom)).video?.lyricPosition).toEqual({ x: 0.34, y: 0.67 })
+  })
+
+  it('rejects positions outside the video frame', () => {
+    const custom = { ...project, video: { ...DEFAULT_VIDEO_SETTINGS, lyricPosition: { x: 1.1, y: 0.5 } } }
+    expect(() => parseProjectJson(JSON.stringify(custom))).toThrow('Vị trí lời bài hát')
+  })
+
+  it('rejects non-finite coordinates and invalid backgrounds', () => {
+    const nonFinite = { ...project, video: { ...DEFAULT_VIDEO_SETTINGS, lyricPosition: { x: Number.NaN, y: 0.5 } } }
+    expect(() => parseProjectJson(JSON.stringify(nonFinite))).toThrow('Vị trí lời bài hát')
+    const invalidColor = { ...project, video: { ...DEFAULT_VIDEO_SETTINGS, backgroundColor: 'url(unsafe)' } }
+    expect(() => parseProjectJson(JSON.stringify(invalidColor))).toThrow('Màu nền video')
   })
 
   it('rejects unsupported schema versions', () => {

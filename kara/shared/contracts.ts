@@ -1,4 +1,4 @@
-export type MediaKind = 'full' | 'beat' | 'lyrics'
+export type MediaKind = 'full' | 'beat' | 'lyrics' | 'background'
 export type SpeakerRole = 'male' | 'female' | 'duet' | 'unknown'
 export type ProviderKind = 'mock' | 'deepgram' | 'custom'
 export type ExportFormat = 'srt' | 'ass'
@@ -57,6 +57,32 @@ export type ExportOptions = {
   leadOutMs: number
 }
 
+export type NormalizedPosition = { x: number; y: number }
+
+export type VideoSettings = {
+  width: number
+  height: number
+  backgroundColor: string
+  lyricPosition: NormalizedPosition
+}
+
+export type RenderRequest = {
+  jobId: string
+  audioPath: string
+  backgroundPath?: string
+  assContent: string
+  duration: number
+  video: VideoSettings
+}
+
+export type RenderProgress = {
+  jobId: string
+  percent: number
+  status: string
+}
+
+export type RenderResult = { path: string } | null
+
 export type KaraProject = {
   schemaVersion: 1
   title: string
@@ -67,6 +93,7 @@ export type KaraProject = {
   speakers: SpeakerProfile[]
   provider: ProviderProfile
   exportOptions: ExportOptions
+  video?: VideoSettings
 }
 
 export type ProviderRequest = {
@@ -89,6 +116,13 @@ export type NormalizedTranscript = {
     words: TimedWord[]
   }>
   duration?: number
+}
+
+export const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
+  width: 1920,
+  height: 1080,
+  backgroundColor: '#10162a',
+  lyricPosition: { x: 0.5, y: 0.78 },
 }
 
 export const DEFAULT_PROVIDER: ProviderProfile = {

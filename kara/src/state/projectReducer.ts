@@ -1,4 +1,4 @@
-import type { KaraProject, LyricSegment, MediaAsset, ProviderProfile, ExportOptions } from '../../shared/contracts'
+import type { KaraProject, LyricSegment, MediaAsset, ProviderProfile, ExportOptions, NormalizedPosition, VideoSettings } from '../../shared/contracts'
 
 export type ProjectHistory = {
   present: KaraProject
@@ -15,6 +15,7 @@ export type ProjectAction =
   | { type: 'delete-segment'; id: string }
   | { type: 'set-provider'; provider: ProviderProfile }
   | { type: 'set-export-options'; options: Partial<ExportOptions> }
+  | { type: 'set-video-settings'; settings: Partial<Omit<VideoSettings, 'lyricPosition'>> & { lyricPosition?: Partial<NormalizedPosition> } }
   | { type: 'undo' }
   | { type: 'redo' }
 
@@ -52,6 +53,21 @@ export function projectReducer(state: ProjectHistory, action: ProjectAction): Pr
       return commit(state, { ...state.present, provider: action.provider })
     case 'set-export-options':
       return commit(state, { ...state.present, exportOptions: { ...state.present.exportOptions, ...action.options } })
+    case 'set-video-settings': {
+      const video = state.present.video
+      return commit(state, {
+        ...state.present,
+        video: {
+          width: action.settings.width ?? video?.width ?? 1920,
+          height: action.settings.height ?? video?.height ?? 1080,
+          backgroundColor: action.settings.backgroundColor ?? video?.backgroundColor ?? '#10162a',
+          lyricPosition: {
+            x: action.settings.lyricPosition?.x ?? video?.lyricPosition.x ?? 0.5,
+            y: action.settings.lyricPosition?.y ?? video?.lyricPosition.y ?? 0.78,
+          },
+        },
+      })
+    }
     case 'undo': {
       const previous = state.past.at(-1)
       if (!previous) return state

@@ -1,4 +1,5 @@
-import type { ExportOptions, LyricSegment, SpeakerRole } from '../../../shared/contracts'
+import type { ExportOptions, LyricSegment, SpeakerRole, VideoSettings } from '../../../shared/contracts'
+import { DEFAULT_VIDEO_SETTINGS } from '../../../shared/contracts'
 import { formatTimecode } from '../timecode'
 
 const ROLE_PREFIX: Record<SpeakerRole, string> = {
@@ -54,15 +55,15 @@ const ROLE_STYLE: Record<SpeakerRole, string> = {
   unknown: 'Default',
 }
 
-export function buildAss(segments: LyricSegment[], options: ExportOptions): string {
+export function buildAss(segments: LyricSegment[], options: ExportOptions, videoSettings: VideoSettings = DEFAULT_VIDEO_SETTINGS): string {
   const lines = [
     '[Script Info]',
     'Title: Kara Studio lyrics',
     'ScriptType: v4.00+',
     'WrapStyle: 2',
     'ScaledBorderAndShadow: yes',
-    'PlayResX: 1920',
-    'PlayResY: 1080',
+    `PlayResX: ${videoSettings.width}`,
+    `PlayResY: ${videoSettings.height}`,
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
@@ -79,7 +80,7 @@ export function buildAss(segments: LyricSegment[], options: ExportOptions): stri
     const start = Math.max(0, segment.start - options.leadInMs / 1000)
     const end = Math.max(start + 0.05, segment.end + options.leadOutMs / 1000)
     const prefix = options.includeSpeakerPrefix ? ROLE_PREFIX[segment.speakerRole] : ''
-    const text = `${assEscape(prefix)}${karaokeText(segment, options.includeKaraokeTags)}`
+    const text = `{\\an5\\pos(${Math.round(videoSettings.lyricPosition.x * videoSettings.width)},${Math.round(videoSettings.lyricPosition.y * videoSettings.height)})}${assEscape(prefix)}${karaokeText(segment, options.includeKaraokeTags)}`
     lines.push(`Dialogue: 0,${formatAssTimecode(start)},${formatAssTimecode(end)},${ROLE_STYLE[segment.speakerRole]},,0,0,0,,${text}`)
   }
   return lines.join('\n')

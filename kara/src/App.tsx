@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { ChangeEvent, CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { DEFAULT_EXPORT_OPTIONS, DEFAULT_PROVIDER, SPEAKER_COLORS, type ExportFormat, type KaraProject, type LyricSegment, type MediaAsset, type MediaKind, type NormalizedTranscript, type ProviderKind, type ProviderProfile, type SpeakerRole } from '../shared/contracts'
+import { DEFAULT_EXPORT_OPTIONS, DEFAULT_PROVIDER, DEFAULT_VIDEO_SETTINGS, SPEAKER_COLORS, type ExportFormat, type KaraProject, type LyricSegment, type MediaAsset, type MediaKind, type NormalizedPosition, type NormalizedTranscript, type ProviderKind, type ProviderProfile, type RenderProgress, type RenderRequest, type SpeakerRole } from '../shared/contracts'
 import { parseProjectJson } from '../shared/validation'
 import { alignLyrics, lyricsToSegments, parseLyrics } from './lib/lyrics/parse'
 import { buildAss, buildSrt } from './lib/export/subtitles'
 import { formatClock, formatTimecode, parseTimecode } from './lib/timecode'
 import { createHistory, projectReducer } from './state/projectReducer'
 import { createDemoSegments, createNewProject } from './state/projectFactory'
+import VideoPreview from './components/VideoPreview'
 
 const makeId = () => globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 const roleLabels: Record<SpeakerRole, string> = { male: 'Nam', female: 'Nữ', duet: 'Đối đáp', unknown: 'Chưa gán' }
@@ -40,11 +41,22 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     split: <><path d="M12 3v8m0 0-5-5m5 5 5-5M5 15v6m14-6v6" /></>,
     merge: <><path d="M5 3v6c0 3 3 3 7 3s7 0 7 3v6M5 3l-3 3m3-3 3 3m11 15-3-3m3 3 3-3" /></>,
     trash: <><path d="M4 7h16m-10 4v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3" /></>,
+    video: <><rect x="3" y="6" width="13" height="12" rx="2" /><path d="m16 10 5-3v10l-5-3Z" /></>,
   }
   return <svg {...common}>{paths[name] ?? <circle cx="12" cy="12" r="8" />}</svg>
 }
 
 type DragState = { id: string; edge: 'start' | 'end'; startX: number; originalStart: number; originalEnd: number }
+
+type RenderState = {
+  jobId: string
+  status: 'idle' | 'running' | 'canceling' | 'done' | 'error' | 'canceled'
+  percent: number
+  message: string
+  error?: string
+  outputPath?: string
+  outputUrl?: string
+}
 
 function App() {
   const [history, dispatch] = useReducer(projectReducer, undefined, () => createHistory(createProject()))
@@ -55,8 +67,10 @@ function App() {
   const [position, setPosition] = useState(0)
   const [duration, setDuration] = useState(0)
   const [playing, setPlaying] = useState(false)
+  const [assetDurations, setAssetDurations] = useState<Record<string, number>>({})
+  const [backgroundUrl, setBackgroundUrl] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
-  const [modal, setModal] = useState<'provider' | 'export' | null>(null)
+  const [modal, setModal] = useState<'provider' | 'export' | 'render' | null>(null)
   const [toast, setToast] = useState('')
   const [providerProfile, setProviderProfile] = useState<ProviderProfile>(DEFAULT_PROVIDER)
   const [apiKey, setApiKey] = useState('')
@@ -66,16 +80,24 @@ function App() {
   const [drag, setDrag] = useState<DragState | null>(null)
   const [lyricsRaw, setLyricsRaw] = useState('')
   const [audioError, setAudioError] = useState('')
+  const [browserImportKind, setBrowserImportKind] = useState<MediaKind>('full')
+  const [renderState, setRenderState] = useState<RenderState>({ jobId: '', status: 'idle', percent: 0, message: '' })
+  const cancelRenderRef = useRef(false)
   const audioRef = useRef<HTMLAudioElement>(null)
+  const backgroundVideoRef = useRef<HTMLVideoElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const rulerRef = useRef<HTMLDivElement>(null)
   const autosaveRef = useRef<number | null>(null)
 
   const fullAsset = project.assets.find((asset) => asset.kind === 'full')
   const beatAsset = project.assets.find((asset) => asset.kind === 'beat')
+  const backgroundAsset = project.assets.find((asset) => asset.kind === 'background')
   const lyricsAsset = project.assets.find((asset) => asset.kind === 'lyrics')
+  const previewBackgroundUrl = backgroundUrl ?? backgroundAsset?.url
   const activeAsset = activeKind === 'full' ? fullAsset : beatAsset
+  const renderAsset = fullAsset ?? beatAsset
   const selected = project.segments.find((segment) => segment.id === selectedId) ?? project.segments[0]
+  const videoSettings = project.video ?? DEFAULT_VIDEO_SETTINGS
   const maxTime = Math.max(duration, ...project.segments.map((segment) => segment.end), 20)
   const sortedSegments = useMemo(() => [...project.segments].sort((a, b) => a.start - b.start), [project.segments])
   const completedCount = project.segments.filter((segment) => !segment.needsReview).length
@@ -94,6 +116,15 @@ function App() {
     const timer = window.setTimeout(() => setToast(''), 3600)
     return () => window.clearTimeout(timer)
   }, [toast])
+
+  useEffect(() => {
+    if (!window.kara) return
+    return window.kara.onRenderProgress((progress) => {
+      setRenderState((current) => current.jobId === progress.jobId
+        ? { ...current, percent: progress.percent, message: progress.status }
+        : current)
+    })
+  }, [])
 
   useEffect(() => {
     if (!playing) return
@@ -145,6 +176,7 @@ function App() {
   }
 
   async function loadMedia(kind: MediaKind) {
+    setBrowserImportKind(kind)
     try {
       const file = await window.kara?.pickFile(kind)
       if (!file) {
@@ -161,6 +193,9 @@ function App() {
         dispatch({ type: 'set-segments', segments: lyricsToSegments(parsed) })
         setSelectedId(project.segments[0]?.id ?? '')
         notify(`${parsed.length} dòng lời đã nhập.`)
+      } else if (kind === 'background') {
+        setBackgroundUrl(file.url)
+        notify('Video nền đã sẵn sàng.')
       } else {
         if (kind === 'full') setActiveKind('full')
         if (kind === 'beat' && !fullAsset) setActiveKind('beat')
@@ -174,7 +209,15 @@ function App() {
 
   async function importBrowserFile(file: File) {
     const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-    const kind: MediaKind = ['txt', 'lrc', 'srt', 'ass', 'ssa'].includes(ext) ? 'lyrics' : activeKind
+    const lyricExtensions = ['txt', 'lrc', 'srt', 'ass', 'ssa']
+    const videoExtensions = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v']
+    const kind: MediaKind = lyricExtensions.includes(ext)
+      ? 'lyrics'
+      : browserImportKind === 'background' || videoExtensions.includes(ext)
+        ? 'background'
+        : browserImportKind === 'beat'
+          ? 'beat'
+          : 'full'
     const url = URL.createObjectURL(file)
     const asset: MediaAsset = { id: makeId(), kind, path: file.name, displayName: file.name, mimeType: file.type, url }
     dispatch({ type: 'set-assets', assets: [...project.assets.filter((item) => item.kind !== kind), asset] })
@@ -184,6 +227,9 @@ function App() {
       const parsed = parseLyrics(text, file.name)
       dispatch({ type: 'set-segments', segments: lyricsToSegments(parsed) })
       notify(`${parsed.length} dòng lời đã nhập.`)
+    } else if (kind === 'background') {
+      setBackgroundUrl(url)
+      notify('Video nền đã sẵn sàng.')
     } else {
       setActiveKind(kind)
       setAudioError('')
@@ -211,10 +257,13 @@ function App() {
       const lyrics = loaded.assets.find((asset) => asset.kind === 'lyrics')
       if (lyrics) setLyricsRaw(await window.kara?.readTextFile(lyrics.path) ?? '')
       const playable = loaded.assets.find((asset) => asset.kind === 'full') ?? loaded.assets.find((asset) => asset.kind === 'beat')
-      if (playable && window.kara) {
-        const url = await window.kara.getMediaUrl(playable.path)
-        dispatch({ type: 'set-assets', assets: loaded.assets.map((asset) => asset.id === playable.id ? { ...asset, url } : asset) })
-        setActiveKind(playable.kind === 'beat' ? 'beat' : 'full')
+      const background = loaded.assets.find((asset) => asset.kind === 'background')
+      if (window.kara) {
+        const playableUrl = playable ? await window.kara.getMediaUrl(playable.path) : undefined
+        const backgroundUrl = background ? await window.kara.getMediaUrl(background.path) : undefined
+        dispatch({ type: 'set-assets', assets: loaded.assets.map((asset) => asset.id === playable?.id ? { ...asset, url: playableUrl } : asset.id === background?.id ? { ...asset, url: backgroundUrl } : asset) })
+        setBackgroundUrl(backgroundUrl)
+        if (playable) setActiveKind(playable.kind === 'beat' ? 'beat' : 'full')
       }
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Không thể mở project.')
@@ -369,12 +418,12 @@ function App() {
 
   function updateExportPreview(format = exportFormat) {
     setExportFormat(format)
-    setExportPreview(format === 'srt' ? buildSrt(sortedSegments, project.exportOptions) : buildAss(sortedSegments, project.exportOptions))
+    setExportPreview(format === 'srt' ? buildSrt(sortedSegments, project.exportOptions) : buildAss(sortedSegments, project.exportOptions, videoSettings))
   }
 
   async function exportFile() {
     updateExportPreview(exportFormat)
-    const content = exportFormat === 'srt' ? buildSrt(sortedSegments, project.exportOptions) : buildAss(sortedSegments, project.exportOptions)
+    const content = exportFormat === 'srt' ? buildSrt(sortedSegments, project.exportOptions) : buildAss(sortedSegments, project.exportOptions, videoSettings)
     try {
       if (window.kara) {
         const result = await window.kara.saveExport(exportFormat, content, `${project.title || 'kara-lyrics'}.${exportFormat}`)
@@ -394,6 +443,73 @@ function App() {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Không thể xuất subtitle.')
     }
+  }
+
+  async function startRender() {
+    if (renderState.status === 'running' || renderState.status === 'canceling') return
+    if (!window.kara) {
+      setModal('render')
+      setRenderState({ jobId: '', status: 'error', percent: 0, message: '', error: 'Render MP4 chỉ khả dụng trong ứng dụng desktop.' })
+      return
+    }
+    if (!renderAsset) {
+      setModal('render')
+      setRenderState({ jobId: '', status: 'error', percent: 0, message: '', error: 'Hãy nhập bản đầy đủ hoặc beat trước khi render.' })
+      return
+    }
+    const jobId = `render-${makeId()}`
+    const renderDuration = Math.max(renderAsset.duration ?? 0, renderAsset.id === activeAsset?.id ? duration : 0, ...sortedSegments.map((segment) => segment.end), 0)
+    if (!renderDuration) {
+      setModal('render')
+      setRenderState({ jobId: '', status: 'error', percent: 0, message: '', error: 'Chưa xác định được thời lượng audio. Hãy phát audio hoặc thêm timing lời trước khi render.' })
+      return
+    }
+    const request: RenderRequest = {
+      jobId,
+      audioPath: renderAsset.path,
+      backgroundPath: backgroundAsset?.path,
+      assContent: buildAss(sortedSegments, project.exportOptions, videoSettings),
+      duration: renderDuration,
+      video: videoSettings,
+    }
+    cancelRenderRef.current = false
+    setModal('render')
+    setRenderState({ jobId, status: 'running', percent: 0, message: 'Đang chuẩn bị render…' })
+    try {
+      const result = await window.kara.startRender(request)
+      if (cancelRenderRef.current || !result) {
+        setRenderState((current) => current.jobId === jobId ? { ...current, status: 'canceled', message: 'Đã hủy render.' } : current)
+        return
+      }
+      const outputUrl = await window.kara.getMediaUrl(result.path)
+      setRenderState((current) => current.jobId === jobId ? { ...current, status: 'done', percent: 100, message: 'Video đã render xong.', outputPath: result.path, outputUrl } : current)
+    } catch (error) {
+      if (cancelRenderRef.current) {
+        setRenderState((current) => current.jobId === jobId ? { ...current, status: 'canceled', message: 'Đã hủy render.' } : current)
+      } else {
+        setRenderState((current) => current.jobId === jobId ? { ...current, status: 'error', message: '', error: error instanceof Error ? error.message : 'Không thể render video.' } : current)
+      }
+    }
+  }
+
+  async function cancelRender() {
+    if (renderState.status !== 'running' || !renderState.jobId || !window.kara) return
+    cancelRenderRef.current = true
+    setRenderState((current) => ({ ...current, status: 'canceling', message: 'Đang hủy render…' }))
+    try {
+      await window.kara.cancelRender(renderState.jobId)
+    } catch {
+      notify('Không thể gửi yêu cầu hủy render.')
+    }
+  }
+
+  function resetRender() {
+    cancelRenderRef.current = false
+    setRenderState({ jobId: '', status: 'idle', percent: 0, message: '' })
+  }
+
+  function setLyricPosition(nextPosition: NormalizedPosition) {
+    dispatch({ type: 'set-video-settings', settings: { lyricPosition: nextPosition } })
   }
 
   function updateTimeField(id: string, key: 'start' | 'end', text: string) {
@@ -445,6 +561,7 @@ function App() {
           <span className="topbar-divider" />
           <button className="button button-quiet" onClick={() => setModal('provider')}><Icon name="settings" size={16} /><span>Provider</span><span className={`connection-dot ${providerProfile.kind !== 'mock' && apiKeyPresent ? 'is-connected' : ''}`} /></button>
           <button className="button button-quiet" onClick={() => void saveProject()}><Icon name="save" size={16} /><span>Lưu</span></button>
+          <button className="button button-quiet render-launch" onClick={() => setModal('render')} disabled={renderState.status === 'running' || renderState.status === 'canceling'}><Icon name="video" size={16} /><span>Render video</span></button>
           <button className="button button-accent" onClick={() => { updateExportPreview(); setModal('export') }}><Icon name="export" size={16} /><span>Xuất lời</span></button>
         </div>
       </header>
@@ -455,6 +572,12 @@ function App() {
           <div className="source-group-label">ÂM THANH</div>
           <SourceCard kind="full" asset={fullAsset} active={activeKind === 'full'} onSelect={() => { setActiveKind('full'); if (fullAsset) setAudioError('') }} onAdd={() => void loadMedia('full')} />
           <SourceCard kind="beat" asset={beatAsset} active={activeKind === 'beat'} onSelect={() => { setActiveKind('beat'); if (beatAsset) setAudioError('') }} onAdd={() => void loadMedia('beat')} />
+          <div className="source-group-label video-label">HÌNH NỀN</div>
+          <button className={`lyrics-source background-source ${backgroundAsset ? 'has-file' : ''}`} onClick={() => void loadMedia('background')}>
+            <span className="source-icon background-icon"><Icon name="video" /></span>
+            <span className="source-info"><strong>{backgroundAsset?.displayName ?? 'Nhập video nền'}</strong><small>{backgroundAsset ? 'Dùng cho preview và render' : 'MP4 · MOV · MKV · WebM · AVI · M4V'}</small></span>
+            {backgroundAsset ? <Icon name="check" size={15} /> : <Icon name="plus" size={15} />}
+          </button>
           <div className="source-group-label lyrics-label">LỜI BÀI HÁT <span>{project.segments.length || '—'}</span></div>
           <button className={`lyrics-source ${lyricsAsset ? 'has-file' : ''}`} onClick={() => void loadMedia('lyrics')}>
             <span className="source-icon lyrics-icon"><Icon name="lyrics" /></span>
@@ -502,6 +625,16 @@ function App() {
             {audioError && <div className="audio-error"><Icon name="warning" size={14} />{audioError}</div>}
             {activeAsset?.url && <audio ref={audioRef} src={activeAsset.url} onLoadedMetadata={(event) => { setDuration(event.currentTarget.duration || 0); setAudioError('') }} onTimeUpdate={(event) => setPosition(event.currentTarget.currentTime)} onEnded={() => setPlaying(false)} onError={() => setAudioError('Không đọc được audio. Hãy thử MP3, WAV, M4A, FLAC hoặc OGG.')} />}
           </section>
+
+          <VideoPreview
+            segments={sortedSegments}
+            time={position}
+            audioAvailable={Boolean(activeAsset?.url)}
+            settings={videoSettings}
+            backgroundUrl={previewBackgroundUrl}
+            playing={playing}
+            onPositionChange={setLyricPosition}
+          />
 
           <div className="timeline-heading">
             <div><div className="section-title">Lời & thời gian</div><p>Kéo mép dòng để căn nhịp · chọn một dòng để sửa</p></div>
@@ -591,7 +724,7 @@ function App() {
 
       <footer className="statusbar"><div><span className="status-ready"><i />Sẵn sàng</span><span className="status-divider" />{project.assets.length} nguồn liên kết<span className="status-divider" />{currentPath ? currentPath.split(/[\\/]/).pop() : 'Project chưa lưu'}</div><div><span>LOCALE</span><strong>VI</strong><span className="status-divider" />Kara Studio · Beta</div></footer>
 
-      <input ref={inputRef} className="visually-hidden" type="file" accept="audio/*,.txt,.lrc,.srt,.ass,.ssa" onChange={(event) => void onBrowserFile(event)} />
+      <input ref={inputRef} className="visually-hidden" type="file" accept="audio/*,video/*,.txt,.lrc,.srt,.ass,.ssa,.mp4,.mov,.mkv,.webm,.avi,.m4v" onChange={(event) => void onBrowserFile(event)} />
 
       {modal === 'provider' && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(null) }}>
         <section className="dialog provider-dialog" role="dialog" aria-modal="true" aria-labelledby="provider-title">
@@ -625,9 +758,25 @@ function App() {
             <div className="export-tabs"><button className={exportFormat === 'ass' ? 'active' : ''} onClick={() => updateExportPreview('ass')}>ASS <small>Karaoke style</small></button><button className={exportFormat === 'srt' ? 'active' : ''} onClick={() => updateExportPreview('srt')}>SRT <small>Phụ đề phổ thông</small></button></div>
             <div className="export-options"><label><input type="checkbox" checked={project.exportOptions.includeSpeakerPrefix} onChange={(event) => dispatch({ type: 'set-export-options', options: { includeSpeakerPrefix: event.target.checked } })} />Thêm nhãn người hát</label>{exportFormat === 'ass' && <label><input type="checkbox" checked={project.exportOptions.includeKaraokeTags} onChange={(event) => dispatch({ type: 'set-export-options', options: { includeKaraokeTags: event.target.checked } })} />Timing tô từng từ <span>(khi có dữ liệu)</span></label>}</div>
             <div className="preview-heading"><span>XEM TRƯỚC</span><span>{project.segments.length} cues</span></div>
-            <pre className="export-preview">{(exportFormat === 'srt' ? buildSrt(sortedSegments, project.exportOptions) : buildAss(sortedSegments, project.exportOptions)).slice(0, 2600)}{(exportFormat === 'srt' ? buildSrt(sortedSegments, project.exportOptions) : buildAss(sortedSegments, project.exportOptions)).length > 2600 ? '\n…' : ''}</pre>
+            <pre className="export-preview">{(exportFormat === 'srt' ? buildSrt(sortedSegments, project.exportOptions) : buildAss(sortedSegments, project.exportOptions, videoSettings)).slice(0, 2600)}{(exportFormat === 'srt' ? buildSrt(sortedSegments, project.exportOptions) : buildAss(sortedSegments, project.exportOptions, videoSettings)).length > 2600 ? '\n…' : ''}</pre>
           </div>
           <div className="dialog-footer"><button className="button button-quiet" onClick={() => setModal(null)}>Đóng</button><button className="button button-accent" onClick={() => void exportFile()}><Icon name="export" size={16} />Lưu file .{exportFormat}</button></div>
+        </section>
+      </div>}
+
+      {modal === 'render' && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && renderState.status !== 'running' && renderState.status !== 'canceling') setModal(null) }}>
+        <section className="dialog render-dialog" role="dialog" aria-modal="true" aria-labelledby="render-title">
+          <div className="dialog-heading"><div><span className="dialog-icon render-dialog-icon"><Icon name="video" /></span><div><h2 id="render-title">Render video karaoke</h2><p>Xuất video MP4 {videoSettings.width} × {videoSettings.height} với lời đã căn timing.</p></div></div><button className="tiny-icon" onClick={() => { if (renderState.status !== 'running' && renderState.status !== 'canceling') setModal(null) }} aria-label="Đóng" disabled={renderState.status === 'running' || renderState.status === 'canceling'}><Icon name="close" /></button></div>
+          <div className="dialog-body render-body">
+            {!window.kara && <div className="desktop-only-note"><Icon name="warning" size={17} /><div><strong>Render cần ứng dụng desktop</strong><p>Browser vẫn dùng được preview, kéo vị trí chữ và chỉnh timing. Hãy mở Kara Studio bản Windows để tạo MP4 bằng FFmpeg.</p></div></div>}
+            <div className="render-summary"><div><span>Nguồn audio</span><strong>{renderAsset?.displayName ?? 'Chưa có audio'}</strong><small>{fullAsset ? 'Ưu tiên bản đầy đủ' : beatAsset ? 'Dùng beat thay thế' : 'Nhập một file audio'}</small></div><div><span>Hình nền</span><strong>{backgroundAsset?.displayName ?? 'Màu nền'}</strong><small>{backgroundAsset ? `Video lặp theo audio · padding ${videoSettings.backgroundColor}` : videoSettings.backgroundColor}</small></div><div><span>Khung hình</span><strong>{videoSettings.width} × {videoSettings.height}</strong><small>Vị trí lời {Math.round(videoSettings.lyricPosition.x * 100)}% · {Math.round(videoSettings.lyricPosition.y * 100)}%</small></div></div>
+            {(renderState.status === 'running' || renderState.status === 'canceling') && <div className="render-progress-panel"><div className="render-progress-heading"><strong>{renderState.status === 'canceling' ? 'Đang hủy…' : 'Đang render video'}</strong><span>{renderState.percent}%</span></div><div className="render-progress-track"><i style={{ width: `${Math.max(0, Math.min(100, renderState.percent))}%` }} /></div><p>{renderState.message || 'Đang chuẩn bị…'}</p></div>}
+            {renderState.status === 'error' && <div className="render-error"><Icon name="warning" size={17} /><div><strong>Không thể render video</strong><p>{renderState.error}</p></div></div>}
+            {renderState.status === 'canceled' && <div className="render-canceled"><strong>Render đã hủy</strong><p>File tạm đã được dọn dẹp; project và timing của bạn vẫn giữ nguyên.</p></div>}
+            {renderState.status === 'done' && renderState.outputUrl && <div className="render-result"><div className="render-result-heading"><div><strong>Video đã sẵn sàng</strong><span>{renderState.outputPath?.split(/[\\/]/).pop()}</span></div><span className="render-complete-mark"><Icon name="check" size={14} /></span></div><video className="render-result-video" controls preload="metadata" src={renderState.outputUrl}>Trình duyệt không hỗ trợ phát video.</video></div>}
+            {renderState.status === 'idle' && <p className="render-help">Kara Studio sẽ dùng bản đầy đủ nếu có; nếu không, app sẽ render bằng beat. Subtitle ASS được tạo từ timing hiện tại và vị trí chữ đang lưu.</p>}
+          </div>
+          <div className="dialog-footer render-dialog-footer">{renderState.status === 'done' || renderState.status === 'error' || renderState.status === 'canceled' ? <button className="button button-quiet" onClick={resetRender}>Render lại</button> : null}<button className="button button-quiet" onClick={() => { if (renderState.status !== 'running' && renderState.status !== 'canceling') setModal(null) }} disabled={renderState.status === 'running' || renderState.status === 'canceling'}>{renderState.status === 'done' ? 'Đóng' : 'Hủy'}</button>{renderState.status === 'running' || renderState.status === 'canceling' ? <button className="button button-danger" onClick={() => void cancelRender()} disabled={renderState.status === 'canceling'}>Hủy render</button> : renderState.status !== 'done' && <button className="button button-accent" onClick={() => void startRender()} disabled={!window.kara || !renderAsset}>Bắt đầu render</button>}</div>
         </section>
       </div>}
       {toast && <div className="toast"><Icon name="check" size={15} />{toast}</div>}

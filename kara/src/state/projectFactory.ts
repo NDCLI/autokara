@@ -1,5 +1,5 @@
 import type { DEFAULT_EXPORT_OPTIONS, DEFAULT_PROVIDER, KaraProject, LyricSegment, MediaAsset, SpeakerProfile } from '../../shared/contracts'
-import { SPEAKER_COLORS } from '../../shared/contracts'
+import { DEFAULT_VIDEO_SETTINGS, SPEAKER_COLORS } from '../../shared/contracts'
 
 const makeId = () => globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -51,6 +51,7 @@ export function createNewProject(defaults: {
     speakers,
     provider: { ...defaults.provider },
     exportOptions: { ...defaults.exportOptions },
+    video: { ...DEFAULT_VIDEO_SETTINGS, lyricPosition: { ...DEFAULT_VIDEO_SETTINGS.lyricPosition } },
   }
 }
 

@@ -1,4 +1,4 @@
-import type { KaraProject, LyricSegment, MediaAsset, ProviderProfile, SpeakerProfile } from './contracts'
+import { DEFAULT_VIDEO_SETTINGS, type KaraProject, type LyricSegment, type MediaAsset, type ProviderProfile, type SpeakerProfile, type VideoSettings } from './contracts'
 
 export const CURRENT_SCHEMA_VERSION = 1
 
@@ -18,12 +18,13 @@ export function assertProject(value: unknown): asserts value is KaraProject {
   for (const segment of project.segments) validateSegment(segment)
   for (const speaker of project.speakers) validateSpeaker(speaker)
   validateProvider(project.provider)
+  if (project.video !== undefined) validateVideoSettings(project.video)
 }
 
 function validateAsset(asset: unknown): asserts asset is MediaAsset {
   if (!asset || typeof asset !== 'object') throw new Error('Asset không hợp lệ.')
   const item = asset as Partial<MediaAsset>
-  if (!item.id || !item.path || !item.displayName || !['full', 'beat', 'lyrics'].includes(item.kind ?? '')) {
+  if (!item.id || !item.path || !item.displayName || !['full', 'beat', 'lyrics', 'background'].includes(item.kind ?? '')) {
     throw new Error('Asset thiếu id, path, displayName hoặc kind hợp lệ.')
   }
 }
@@ -34,7 +35,9 @@ function validateSegment(segment: unknown): asserts segment is LyricSegment {
   if (!item.id || typeof item.text !== 'string' || typeof item.start !== 'number' || typeof item.end !== 'number' || !Array.isArray(item.words)) {
     throw new Error('Segment thiếu id/text/start/end/words.')
   }
-  if (item.start < 0 || item.end < item.start) throw new Error(`Timing không hợp lệ ở segment ${item.id}.`)
+  if (!Number.isFinite(item.start) || !Number.isFinite(item.end) || item.start < 0 || item.end < item.start) {
+    throw new Error(`Timing không hợp lệ ở segment ${item.id}.`)
+  }
 }
 
 function validateSpeaker(speaker: unknown): asserts speaker is SpeakerProfile {
@@ -51,6 +54,27 @@ function validateProvider(provider: unknown): asserts provider is ProviderProfil
   }
 }
 
+function validateVideoSettings(value: unknown): asserts value is VideoSettings {
+  if (!value || typeof value !== 'object') throw new Error('Cấu hình video không hợp lệ.')
+  const video = value as Partial<VideoSettings>
+  if (!Number.isInteger(video.width) || !Number.isInteger(video.height) || video.width! < 16 || video.height! < 16 || video.width! > 3840 || video.height! > 2160 || video.width! % 2 !== 0 || video.height! % 2 !== 0) {
+    throw new Error('Kích thước video không hợp lệ.')
+  }
+  if (typeof video.backgroundColor !== 'string' || !/^#[\da-f]{6}$/i.test(video.backgroundColor)) {
+    throw new Error('Màu nền video không hợp lệ.')
+  }
+  const position = video.lyricPosition
+  if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y) || position.x < 0 || position.x > 1 || position.y < 0 || position.y > 1) {
+    throw new Error('Vị trí lời bài hát phải nằm trong khung video (0–100%).')
+  }
+}
+
+export function normalizeProject(project: KaraProject): KaraProject {
+  assertProject(project)
+  const video = project.video ?? DEFAULT_VIDEO_SETTINGS
+  return { ...project, video: { ...video, lyricPosition: { ...video.lyricPosition } } }
+}
+
 export function parseProjectJson(text: string): KaraProject {
   let value: unknown
   try {
@@ -59,10 +83,9 @@ export function parseProjectJson(text: string): KaraProject {
     throw new Error('Không thể đọc project: JSON bị lỗi.')
   }
   assertProject(value)
-  return value
+  return normalizeProject(value)
 }
 
 export function serializeProject(project: KaraProject): string {
-  assertProject(project)
-  return JSON.stringify(project, null, 2)
+  return JSON.stringify(normalizeProject(project), null, 2)
 }
