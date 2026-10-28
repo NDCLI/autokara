@@ -93,6 +93,7 @@ export function lyricsToSegments(lines: ParsedLyric[], fallbackStart = 0): Lyric
       speakerRole: 'unknown' as SpeakerRole,
       words: line.words ?? [],
       needsReview: !line.words?.length,
+      origin: line.start !== undefined || line.end !== undefined || line.words?.length ? 'manual' as const : 'estimated' as const,
     }
   })
 }
@@ -154,6 +155,7 @@ export function alignLyrics(lines: ParsedLyric[], transcript: NormalizedTranscri
       words: matched?.words ?? line.words ?? [],
       confidence: matched?.confidence,
       needsReview: !matched || (matched.confidence ?? 1) < 0.68,
+      origin: matched ? 'aligned' as const : line.start !== undefined || line.end !== undefined ? 'manual' as const : 'estimated' as const,
     }
   })
 }

@@ -1,18 +1,56 @@
-const { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, net, protocol } = require('electron')
 const fs = require('node:fs/promises')
 const fsSync = require('node:fs')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawn } = require('node:child_process')
 const { randomUUID } = require('node:crypto')
-const { buildFfmpegArgs, assertOutputDoesNotMatchInputs, parseProgressLine, publishRenderOutput } = require('./render-utils.cjs')
+const { buildFfmpegArgs, buildVideoPreviewArgs, assertOutputDoesNotMatchInputs, parseProgressLine, publishRenderOutput, supportsBrowserPreviewEncoders, supportsRequiredEncoders } = require('./render-utils.cjs')
+const { extractWaveform } = require('./waveform.cjs')
+const { createTranscriptionCache } = require('./transcription-cache.cjs')
+const { createRecoveryStore } = require('./recovery-store.cjs')
+const { createJobRegistry } = require('./job-registry.cjs')
+
+// Allow isolated packaged launches for smoke checks without touching the normal profile.
+if (process.env.KARA_USER_DATA_DIR?.trim()) {
+  app.setPath('userData', path.resolve(process.env.KARA_USER_DATA_DIR.trim()))
+}
 
 const isDev = Boolean(process.env.ELECTRON_RENDERER_URL)
-const renderJobs = new Map()
+const renderJobs = createJobRegistry()
+const transcriptionJobs = createJobRegistry()
+const separationJobs = createJobRegistry()
 let capabilityCheck
+const videoPreviewJobs = new Map()
+let transcriptionCache
+let recoveryStore
 let quitRequested = false
 let mainWindow = null
 const settingsFile = () => path.join(app.getPath('userData'), 'provider-settings.json')
+function getTranscriptionCache() {
+  if (!transcriptionCache) transcriptionCache = createTranscriptionCache({ directory: path.join(app.getPath('userData'), 'transcription-cache') })
+  return transcriptionCache
+}
+function getRecoveryStore() {
+  if (!recoveryStore) recoveryStore = createRecoveryStore(path.join(app.getPath('userData'), 'recovery.kara.json'))
+  return recoveryStore
+}
+function cancelTranscriptionJob(job) {
+  job.canceled = true
+  job.abortController.abort()
+  if (job.child && !job.child.killed) job.child.kill()
+}
+function pythonCandidates(preferredExecutable) {
+  if (preferredExecutable?.trim()) return [{ executable: preferredExecutable.trim(), prefix: [] }]
+  if (process.env.KARA_PYTHON?.trim()) return [{ executable: process.env.KARA_PYTHON.trim(), prefix: [] }]
+  return process.platform === 'win32'
+    ? [
+        { executable: 'py', prefix: ['-3.12'] }, { executable: 'py', prefix: ['-3.11'] }, { executable: 'py', prefix: ['-3.10'] },
+        { executable: 'python3.12', prefix: [] }, { executable: 'python3.11', prefix: [] }, { executable: 'python3.10', prefix: [] },
+        { executable: 'python', prefix: [] }, { executable: 'py', prefix: ['-3'] },
+      ]
+    : [{ executable: 'python3.12', prefix: [] }, { executable: 'python3.11', prefix: [] }, { executable: 'python3.10', prefix: [] }, { executable: 'python3', prefix: [] }, { executable: 'python', prefix: [] }]
+}
 const localWhisperWorker = () => {
   const candidates = [
     path.join(process.resourcesPath, 'local-whisper-worker.py'),
@@ -27,12 +65,27 @@ const localWhisperWorker = () => {
 
 const DEFAULT_PROVIDER = {
   kind: 'mock',
-  endpoint: 'https://api.deepgram.com/v1/listen',
-  model: 'nova-3',
+  model: 'small',
   language: 'vi',
-  diarize: true,
-  customSegmentsPath: 'segments',
-  customWordsPath: 'words',
+}
+
+function normalizeProviderProfile(value) {
+  const source = value && typeof value === 'object' ? value : {}
+  const kind = source.kind === 'local' ? 'local' : 'mock'
+  const profile = {
+    ...DEFAULT_PROVIDER,
+    kind,
+    model: typeof source.model === 'string' ? source.model : DEFAULT_PROVIDER.model,
+    language: typeof source.language === 'string' ? source.language : DEFAULT_PROVIDER.language,
+  }
+  for (const key of ['localModelPath', 'localPythonPath', 'alignmentModelPath']) {
+    if (typeof source[key] === 'string') profile[key] = source[key]
+  }
+  if (['auto', 'cpu', 'cuda'].includes(source.localDevice)) profile.localDevice = source.localDevice
+  if (['original', 'vocal', 'auto'].includes(source.localSource)) profile.localSource = source.localSource
+  if (typeof source.useForcedAlignment === 'boolean') profile.useForcedAlignment = source.useForcedAlignment
+  if (typeof source.useVocalSeparation === 'boolean') profile.useVocalSeparation = source.useVocalSeparation
+  return profile
 }
 
 function createWindow() {
@@ -52,7 +105,9 @@ function createWindow() {
   })
   mainWindow = window
   window.on('closed', () => {
-    for (const job of renderJobs.values()) if (job.owner === window) cancelRenderJob(job)
+    renderJobs.cancelOwned(window, cancelRenderJob)
+    transcriptionJobs.cancelOwned(window, cancelTranscriptionJob)
+    separationJobs.cancelOwned(window, cancelTranscriptionJob)
     if (mainWindow === window) mainWindow = null
   })
   if (isDev) void window.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -69,28 +124,19 @@ async function readSettings() {
   try {
     const raw = await fs.readFile(settingsFile(), 'utf8')
     const value = JSON.parse(raw)
-    return { profile: { ...DEFAULT_PROVIDER, ...(value.profile || {}) }, encryptedApiKey: value.encryptedApiKey }
+    const profile = normalizeProviderProfile(value.profile)
+    const legacyCredentials = Object.hasOwn(value, 'encryptedApiKey')
+    const legacyProfile = value.profile?.kind === 'deepgram' || value.profile?.kind === 'custom' || Object.hasOwn(value.profile || {}, 'endpoint')
+    if (legacyCredentials || legacyProfile) await writeSettings(profile)
+    return { profile }
   } catch {
-    return { profile: { ...DEFAULT_PROVIDER }, encryptedApiKey: undefined }
+    return { profile: { ...DEFAULT_PROVIDER } }
   }
 }
 
-async function writeSettings(profile, apiKey) {
-  const encryptedApiKey = apiKey && safeStorage.isEncryptionAvailable()
-    ? safeStorage.encryptString(apiKey).toString('base64')
-    : undefined
+async function writeSettings(profile) {
   await fs.mkdir(path.dirname(settingsFile()), { recursive: true })
-  await fs.writeFile(settingsFile(), JSON.stringify({ profile, encryptedApiKey }, null, 2), 'utf8')
-}
-
-async function getApiKey() {
-  const settings = await readSettings()
-  if (!settings.encryptedApiKey || !safeStorage.isEncryptionAvailable()) return ''
-  try {
-    return safeStorage.decryptString(Buffer.from(settings.encryptedApiKey, 'base64'))
-  } catch {
-    return ''
-  }
+  await fs.writeFile(settingsFile(), JSON.stringify({ profile: normalizeProviderProfile(profile) }, null, 2), 'utf8')
 }
 
 function makeId(prefix, index) {
@@ -118,89 +164,48 @@ function mockTranscript(lyricsText) {
   return { segments }
 }
 
-function readPath(value, pathValue) {
-  if (!pathValue) return value
-  return pathValue.split('.').reduce((current, part) => {
-    const match = part.match(/^([^\[]+)(?:\[(\d+)\])?$/)
-    if (!match || current === null || current === undefined || typeof current !== 'object') return undefined
-    const next = current[match[1]]
-    return match[2] === undefined ? next : Array.isArray(next) ? next[Number(match[2])] : undefined
-  }, value)
-}
-
-function number(value, fallback = 0) {
-  const parsed = typeof value === 'number' ? value : Number(value)
-  return Number.isFinite(parsed) ? parsed : fallback
-}
-
-function normalizeWords(raw, segmentStart, segmentEnd, segmentIndex) {
-  if (!Array.isArray(raw)) return []
-  return raw.flatMap((item, index) => {
-    if (!item || typeof item !== 'object') return []
-    const value = item
-    const text = String(value.punctuated_word || value.word || value.text || '').trim()
-    if (!text) return []
-    const start = Math.max(segmentStart, number(value.start, segmentStart))
-    const end = Math.max(start + 0.01, Math.min(segmentEnd, number(value.end, start + 0.1)))
-    return [{ id: `word-${segmentIndex}-${index + 1}`, text, start, end, confidence: number(value.confidence, 1) }]
-  })
-}
-
-function normalizeDeepgram(payload) {
-  const alternative = payload?.results?.channels?.[0]?.alternatives?.[0]
-  if (!alternative) throw new Error('Deepgram response không có channel/alternative.')
-  const words = normalizeWords(alternative.words, 0, Number.MAX_SAFE_INTEGER, 0)
-  const paragraphs = alternative.paragraphs?.paragraphs
-  if (Array.isArray(paragraphs) && paragraphs.length) {
-    const segments = paragraphs.flatMap((paragraph, index) => {
-      const start = number(paragraph.start)
-      const end = Math.max(start + 0.1, number(paragraph.end, start + 1))
-      const paragraphWords = normalizeWords(paragraph.sentences || paragraph.words, start, end, index)
-      const text = String(paragraph.text || paragraphWords.map((word) => word.text).join(' ')).trim()
-      return text ? [{ id: `segment-${index + 1}`, text, start, end, speakerId: paragraph.speaker === undefined ? undefined : String(paragraph.speaker), confidence: number(paragraph.confidence, 1), words: paragraphWords }] : []
-    })
-    if (segments.length) return { segments, duration: payload?.metadata?.duration }
-  }
-  const transcript = String(alternative.transcript || '').trim()
-  if (!transcript) throw new Error('Deepgram response không có transcript.')
-  return { segments: [{ id: 'segment-1', text: transcript, start: words[0]?.start || 0, end: words.at(-1)?.end || 1, words }], duration: payload?.metadata?.duration }
-}
-
-function normalizeCustom(payload, profile) {
-  const rawSegments = readPath(payload, profile.customSegmentsPath || 'segments')
-  if (!Array.isArray(rawSegments)) throw new Error('Provider không trả về segments hợp lệ. Kiểm tra JSON path.')
-  const segments = rawSegments.flatMap((item, index) => {
-    if (!item || typeof item !== 'object') return []
-    const value = item
-    const start = number(value.start || value.startTime)
-    const end = Math.max(start + 0.1, number(value.end || value.endTime, start + 1))
-    const words = normalizeWords(value.words, start, end, index)
-    const text = String(value.text || value.transcript || words.map((word) => word.text).join(' ')).trim()
-    return text ? [{ id: String(value.id || `segment-${index + 1}`), text, start, end, speakerId: value.speaker === undefined ? value.speakerId === undefined ? undefined : String(value.speakerId) : String(value.speaker), confidence: value.confidence === undefined ? undefined : number(value.confidence), words }] : []
-  })
-  if (!segments.length) throw new Error('Provider không trả về segment có nội dung.')
-  return { segments }
-}
-
-function spawnLocalWorker(args) {
+function spawnLocalWorker(args, onProgress, job, preferredExecutable) {
   const worker = localWhisperWorker()
-  const candidates = process.env.KARA_PYTHON
-    ? [{ executable: process.env.KARA_PYTHON, prefix: [] }]
-    : process.platform === 'win32'
-      ? [{ executable: 'python', prefix: [] }, { executable: 'py', prefix: ['-3'] }]
-      : [{ executable: 'python3', prefix: [] }, { executable: 'python', prefix: [] }]
+  const candidates = pythonCandidates(preferredExecutable)
+  const isHealthCheck = args.includes('--health-check')
   return new Promise((resolve, reject) => {
     let index = 0
-    let child
     let settled = false
     let lastError
+    let bestHealthResult
+    let timeout
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      job.abortController.signal.removeEventListener('abort', abortCurrent)
+      error ? reject(error) : resolve(value)
+    }
+    const abortCurrent = () => {
+      lastError = new Error('Đã hủy nhận dạng.')
+      if (job.child && !job.child.killed) job.child.kill()
+      else if (!job.child) finish(lastError)
+    }
+    timeout = setTimeout(() => {
+      if (settled) return
+      lastError = new Error('Nhận dạng local vượt quá thời gian chờ 30 phút.')
+      if (job.child && !job.child.killed) job.child.kill()
+      else finish(lastError)
+    }, 30 * 60 * 1000)
+    job.abortController.signal.addEventListener('abort', abortCurrent, { once: true })
+    if (job.canceled) return abortCurrent()
     const start = () => {
+      if (settled) return
       if (index >= candidates.length) {
-        reject(lastError || new Error('Không tìm thấy Python runtime để chạy timestamp local.'))
+        if (isHealthCheck && bestHealthResult) return finish(null, bestHealthResult)
+        finish(lastError || new Error('Không tìm thấy Python runtime để chạy timestamp local.'))
         return
       }
       const candidate = candidates[index++]
-      child = spawn(candidate.executable, [...candidate.prefix, worker, ...args], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      job.executable = candidate.executable
+      const child = spawn(candidate.executable, [...candidate.prefix, worker, ...args], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      job.child = child
+      let spawnFailed = false
       let stdout = ''
       let stderr = ''
       child.stdout.on('data', (chunk) => {
@@ -211,68 +216,166 @@ function spawnLocalWorker(args) {
           if (!line.trim()) continue
           try {
             const message = JSON.parse(line)
-            if (message.type === 'result') return resolve(message)
-            if (message.type === 'error') lastError = new Error(message.message || 'Local timestamp worker thất bại.')
+            if (message.type === 'progress') onProgress?.(message)
+            if (message.type === 'result') {
+              if (!isHealthCheck) return finish(null, message)
+              const score = Number(Boolean(message.pythonSupported)) * 2 + Number(Boolean(message.fasterWhisper?.available)) * 4 + Number(Boolean(message.demucs?.available)) * 4
+              const bestScore = bestHealthResult ? Number(Boolean(bestHealthResult.pythonSupported)) * 2 + Number(Boolean(bestHealthResult.fasterWhisper?.available)) * 4 + Number(Boolean(bestHealthResult.demucs?.available)) * 4 : -1
+              if (score > bestScore) bestHealthResult = message
+              const requirement = job.runtimeRequirement || 'fasterWhisper'
+              const requirementReady = requirement === 'fasterWhisper' ? message.runtimeReady : message[requirement]?.available
+              if (message.pythonSupported && requirementReady) return finish(null, message)
+              if (index >= candidates.length) return finish(null, bestHealthResult)
+            }
+            if (message.type === 'error') {
+              lastError = new Error(message.message || 'Local timestamp worker thất bại.')
+              lastError.code = message.code
+            }
           } catch { /* ignore non-JSON worker output */ }
         }
       })
-      child.stderr.on('data', (chunk) => { stderr += chunk.toString() })
+      child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-16384) })
       child.once('error', (error) => {
+        spawnFailed = true
         lastError = error
-        start()
+        if (error.code === 'ENOENT') start()
+        else finish(error)
       })
       child.once('close', (code) => {
-        if (settled) return
-        if (code !== 0 && !lastError && stderr.trim()) lastError = new Error(stderr.trim().split(/\r?\n/).at(-1))
-        if (code !== 0) start()
+        if (settled || spawnFailed) return
+        if (job.canceled) {
+          finish(lastError || new Error('Đã hủy nhận dạng.'))
+          return
+        }
+        if (isHealthCheck && code === 0 && bestHealthResult && index < candidates.length) start()
+        else if (lastError && ['runtime-missing', 'runtime-unsupported'].includes(lastError.code) && index < candidates.length) {
+          lastError = undefined
+          start()
+        } else if (code === 0 && !lastError) finish(new Error('Worker local kết thúc mà không trả kết quả.'))
+        else if (lastError) finish(lastError)
+        else finish(new Error(stderr.trim().split(/\r?\n/).at(-1) || `Worker local kết thúc với mã ${code}.`))
       })
     }
-    const finish = (handler) => (value) => {
-      if (settled) return
-      settled = true
-      handler(value)
-    }
-    const originalResolve = resolve
-    resolve = finish(originalResolve)
     start()
   })
 }
 
-async function callLocalWhisper(profile, audioPath) {
+async function callLocalWhisper(profile, audioPath, lyricsText, onProgress, job) {
   ensureFile(audioPath)
   if (!fsSync.existsSync(localWhisperWorker())) throw new Error('Không tìm thấy worker timestamp local trong ứng dụng.')
   const requestedModel = profile.localModelPath || profile.model
-  const model = profile.localModelPath || (['tiny', 'base', 'small', 'medium'].includes(requestedModel) ? requestedModel : 'small')
-  const result = await spawnLocalWorker(['--audio', ensureFile(audioPath), '--model', model, '--language', profile.language || 'vi', '--device', profile.localDevice || 'auto'])
+  const model = profile.localModelPath || (['tiny', 'base', 'small', 'medium', 'large-v3-turbo'].includes(requestedModel) ? requestedModel : 'small')
+  const args = ['--audio', ensureFile(audioPath), '--model', model, '--language', profile.language || 'vi', '--device', profile.localDevice || 'auto']
+  if (lyricsText?.trim()) args.push('--prompt', lyricsText.slice(0, 4000))
+  if (profile.useForcedAlignment) {
+    args.push('--forced-align')
+    if (profile.alignmentModelPath?.trim()) args.push('--align-model', profile.alignmentModelPath.trim())
+  }
+  const result = await spawnLocalWorker(args, onProgress, job, profile.localPythonPath)
   if (!Array.isArray(result.segments)) throw new Error('Worker local trả về dữ liệu timestamp không hợp lệ.')
-  return { duration: result.duration, segments: result.segments }
+  return { duration: result.duration, segments: result.segments, timingMethod: result.timingMethod, device: result.device, deviceFallbackReason: result.deviceFallbackReason }
 }
 
-async function callProvider(profile, audioPath, lyricsText) {
-  if (profile.kind === 'mock') return mockTranscript(lyricsText)
-  if (profile.kind === 'local') return callLocalWhisper(profile, audioPath)
-  const audio = await fs.readFile(ensureFile(audioPath))
-  const apiKey = await getApiKey()
-  if (!apiKey) throw new Error('Chưa có API key. Mở Cấu hình provider để lưu key trên máy này.')
-  if (!profile.endpoint?.trim()) throw new Error('Provider chưa có endpoint.')
-  const url = new URL(profile.endpoint)
-  if (profile.kind === 'deepgram') {
-    url.searchParams.set('model', profile.model)
-    url.searchParams.set('language', profile.language)
-    url.searchParams.set('diarize', String(profile.diarize))
-    url.searchParams.set('punctuate', 'true')
-    url.searchParams.set('utterances', 'true')
-    url.searchParams.set('paragraphs', 'true')
+async function separateVocals(audioPath, preferredExecutable, job) {
+  const source = ensureFile(audioPath)
+  const stats = await fs.stat(source)
+  const key = require('node:crypto').createHash('sha256').update(`${path.resolve(source)}\0${stats.size}\0${stats.mtimeMs}`).digest('hex')
+  const cacheRoot = path.join(app.getPath('userData'), 'separation-cache', key)
+  const outputRoot = path.join(cacheRoot, 'demucs-output')
+  const basename = path.basename(source, path.extname(source))
+  const modelDirectory = path.join(outputRoot, 'htdemucs', basename)
+  const vocalsPath = path.join(modelDirectory, 'vocals.wav')
+  const instrumentalPath = path.join(modelDirectory, 'no_vocals.wav')
+  try {
+    if ((await fs.stat(vocalsPath)).size && (await fs.stat(instrumentalPath)).size) return { vocalsPath, instrumentalPath, cacheHit: true }
+  } catch {}
+  const runtime = await checkLocalRuntime({ localPythonPath: preferredExecutable }, 'demucs')
+  if (!runtime.pythonSupported) throw new Error('Demucs cần Python 3.10–3.12 theo runtime hiện tại.')
+  if (!runtime.demucs?.available) {
+    if (runtime.demucs?.version) throw new Error(`Demucs đã có nhưng runtime thiếu dependency: ${runtime.demucs.error || 'không thể import module'}.`)
+    throw new Error('Chưa cài Demucs trong Python runtime đã chọn. Cài bằng: python -m pip install demucs')
   }
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Token ${apiKey}`, 'Content-Type': 'application/octet-stream' },
-    body: audio,
-    signal: AbortSignal.timeout(120000),
+  const candidates = pythonCandidates(preferredExecutable)
+  await fs.mkdir(cacheRoot, { recursive: true })
+  await fs.rm(modelDirectory, { recursive: true, force: true })
+  const args = ['-m', 'demucs', '--two-stems=vocals', '--name', 'htdemucs', '--out', outputRoot, source]
+  await new Promise((resolve, reject) => {
+    let index = 0
+    let settled = false
+    let lastError
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      job.abortController.signal.removeEventListener('abort', abort)
+      error ? reject(error) : resolve()
+    }
+    const abort = () => {
+      lastError = new Error('Đã hủy tách vocal.')
+      if (job.child && !job.child.killed) job.child.kill()
+      else finish(lastError)
+    }
+    const timeout = setTimeout(() => {
+      lastError = new Error('Tách vocal quá 2 giờ và đã dừng.')
+      if (job.child && !job.child.killed) job.child.kill()
+      else finish(lastError)
+    }, 2 * 60 * 60 * 1000)
+    job.abortController.signal.addEventListener('abort', abort, { once: true })
+    const start = () => {
+      if (settled || job.canceled) return abort()
+      if (index >= candidates.length) return finish(lastError || new Error('Không tìm được Python runtime để chạy Demucs.'))
+      const candidate = candidates[index++]
+      job.executable = candidate.executable
+      const child = spawn(candidate.executable, [...candidate.prefix, ...args], { shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+      job.child = child
+      let spawnFailed = false
+      let stderr = ''
+      child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-12000) })
+      child.once('error', (error) => {
+        spawnFailed = true
+        lastError = error
+        if (error.code === 'ENOENT') start()
+        else finish(error)
+      })
+      child.once('close', (code) => {
+        if (settled || spawnFailed) return
+        if (job.canceled) return finish(new Error('Đã hủy tách vocal.'))
+        if (code === 0) return finish(null)
+        finish(new Error(stderr.trim().split(/\r?\n/).at(-1) || `Demucs kết thúc với mã ${code}.`))
+      })
+    }
+    start()
   })
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) throw new Error(`Provider trả về HTTP ${response.status}.`)
-  return profile.kind === 'deepgram' ? normalizeDeepgram(payload) : normalizeCustom(payload, profile)
+  if (job.canceled) throw new Error('Đã hủy tách vocal.')
+  if (!(await fs.stat(vocalsPath)).size || !(await fs.stat(instrumentalPath)).size) throw new Error('Demucs kết thúc nhưng không tạo đủ hai stem WAV.')
+  return { vocalsPath, instrumentalPath, cacheHit: false }
+}
+
+async function checkLocalRuntime(profile = {}, runtimeRequirement = 'fasterWhisper') {
+  if (!fsSync.existsSync(localWhisperWorker())) throw new Error('Không tìm thấy worker timestamp local trong ứng dụng.')
+  const job = { child: null, canceled: false, abortController: new AbortController(), runtimeRequirement }
+  const result = await spawnLocalWorker(['--health-check'], undefined, job, profile.localPythonPath)
+  if (!result.healthCheck || !result.pythonVersion || !result.fasterWhisper) throw new Error('Python runtime trả về báo cáo kiểm tra không hợp lệ.')
+  let manifest = null
+  let manifestLoaded = false
+  const manifestCandidates = [
+    path.join(process.resourcesPath, 'local-runtime-manifest.json'),
+    path.join(__dirname, 'local-runtime-manifest.json'),
+  ]
+  for (const manifestPath of manifestCandidates) {
+    try {
+      manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'))
+      manifestLoaded = true
+      break
+    } catch {}
+  }
+  return { ...result, manifest, manifestLoaded, pythonExecutable: result.pythonExecutable || job.executable }
+}
+
+async function callProvider(profile, audioPath, lyricsText, onProgress, job) {
+  if (profile.kind === 'mock') return mockTranscript(lyricsText)
+  if (profile.kind === 'local') return callLocalWhisper(profile, audioPath, lyricsText, onProgress, job)
+  throw new Error('Provider không được hỗ trợ. Hãy chọn Demo offline hoặc Whisper local.')
 }
 
 
@@ -281,8 +384,8 @@ function resolveFfmpegPath() {
   try {
     const packagePath = require('ffmpeg-static')
     if (typeof packagePath === 'string') {
-      candidates.push(packagePath)
       candidates.push(packagePath.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`))
+      candidates.push(packagePath)
     }
   } catch { /* resolved from explicit paths below */ }
   if (app.isPackaged) candidates.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe'))
@@ -303,7 +406,7 @@ function captureProcessOutput(executable, args) {
     }
     child.stdout.on('data', (chunk) => { output = collect(output, chunk) })
     child.stderr.on('data', (chunk) => { failure = collect(failure, chunk) })
-    child.once('error', () => reject(new Error('Không thể khởi động FFmpeg. Hãy cài lại ứng dụng.')))
+    child.once('error', (error) => reject(new Error(`Không thể khởi động FFmpeg (${error.code ?? 'unknown'}): ${error.message}`)))
     child.once('close', (code) => code === 0 ? resolve(`${output}\n${failure}`) : reject(new Error('Không thể kiểm tra khả năng của FFmpeg.')))
   })
 }
@@ -317,8 +420,7 @@ async function getUsableFfmpeg() {
         captureProcessOutput(executable, ['-hide_banner', '-encoders']),
       ])
       if (!/\bsubtitles\b/.test(filters)) throw new Error('FFmpeg đi kèm thiếu bộ lọc phụ đề libass.')
-      if (!/\blibx264\b/.test(encoders)) throw new Error('FFmpeg đi kèm thiếu bộ mã hóa H.264 (libx264).')
-      if (!/^\s*[VAS\.]{6}\s+aac\b/m.test(encoders)) throw new Error('FFmpeg đi kèm thiếu bộ mã hóa âm thanh AAC.')
+      if (!supportsRequiredEncoders(encoders)) throw new Error('FFmpeg đi kèm thiếu bộ mã hóa H.264 hoặc AAC cần thiết.')
       return executable
     })()
   }
@@ -422,7 +524,6 @@ async function runRenderJob(owner, request, outputPath, ffmpegPath, job = { id: 
     throw error
   } finally {
     job.closed = true
-    renderJobs.delete(job.id)
     await Promise.all([fs.rm(subtitlePath, { force: true }), fs.rm(tempPath, { force: true })])
   }
 }
@@ -433,7 +534,7 @@ function registerIpc() {
       ? [{ name: 'Lyrics / subtitles', extensions: ['txt', 'lrc', 'srt', 'ass', 'ssa'] }]
       : kind === 'background'
         ? [{ name: 'Video background', extensions: ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v'] }]
-        : [{ name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'webm'] }]
+        : [{ name: kind === 'vocal' ? 'Vocal stem' : 'Audio', extensions: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'webm'] }]
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile'], filters })
     if (result.canceled || !result.filePaths[0]) return null
     const selected = ensureFile(result.filePaths[0])
@@ -445,6 +546,83 @@ function registerIpc() {
     return { path: selected, displayName: path.basename(selected), mimeType, url: kind === 'lyrics' ? undefined : `kara-media://local/${encodeURIComponent(selected)}` }
   })
   ipcMain.handle('media-url', async (_event, filePath) => `kara-media://local/${encodeURIComponent(ensureFile(filePath))}`)
+  ipcMain.handle('waveform', async (_event, filePath) => {
+    const image = await extractWaveform(await getUsableFfmpeg(), ensureFile(filePath))
+    return `data:image/png;base64,${image.toString('base64')}`
+  })
+  ipcMain.handle('extract-video-audio', async (_event, filePath) => {
+    const source = ensureFile(filePath)
+    const ffmpegPath = await getUsableFfmpeg()
+    const directory = path.join(app.getPath('userData'), 'extracted-video-audio')
+    await fs.mkdir(directory, { recursive: true })
+    const stats = await fs.stat(source)
+    const key = require('node:crypto').createHash('sha256').update(`${path.resolve(source)}\0${stats.size}\0${stats.mtimeMs}`).digest('hex')
+    const output = path.join(directory, `${key}.wav`)
+    try {
+      const cached = await fs.stat(output)
+      if (cached.size) return { path: output, displayName: `${path.basename(source, path.extname(source))} · audio.wav`, mimeType: 'audio/wav', url: `kara-media://local/${encodeURIComponent(output)}` }
+    } catch {}
+    const tempOutput = path.join(directory, `${randomUUID()}.tmp.wav`)
+    await new Promise((resolve, reject) => {
+      const child = spawn(ffmpegPath, ['-nostdin', '-y', '-i', source, '-map', '0:a:0', '-vn', '-ac', '2', '-ar', '16000', '-c:a', 'pcm_s16le', tempOutput], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+      let stderr = ''
+      child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-8000) })
+      child.once('error', reject)
+      child.once('close', (code) => code === 0 ? resolve() : reject(new Error(stderr.includes('matches no streams') || stderr.includes('does not contain any stream') ? 'Video này không có track audio.' : `Không trích được audio từ video: ${stderr.trim().slice(-1200)}`)))
+    })
+    try {
+      const extracted = await fs.stat(tempOutput)
+      if (!extracted.size) throw new Error('Video không có track audio hợp lệ.')
+      await fs.rename(tempOutput, output)
+    } finally { await fs.rm(tempOutput, { force: true }) }
+    return { path: output, displayName: `${path.basename(source, path.extname(source))} · audio.wav`, mimeType: 'audio/wav', url: `kara-media://local/${encodeURIComponent(output)}` }
+  })
+  ipcMain.handle('prepare-video-preview', async (_event, filePath) => {
+    const source = ensureFile(filePath)
+    const stats = await fs.stat(source)
+    const key = require('node:crypto').createHash('sha256').update(`${path.resolve(source)}\0${stats.size}\0${stats.mtimeMs}\0preview-h264-v2`).digest('hex')
+    const directory = path.join(app.getPath('userData'), 'video-preview-cache')
+    const output = path.join(directory, `${key}.mp4`)
+    try {
+      const cached = await fs.stat(output)
+      if (cached.size) return pathToFileURL(output).toString()
+    } catch {}
+    const active = videoPreviewJobs.get(key)
+    if (active) return active
+    const operation = (async () => {
+      const ffmpegPath = await getUsableFfmpeg()
+      const encoders = await captureProcessOutput(ffmpegPath, ['-hide_banner', '-encoders'])
+      if (!supportsBrowserPreviewEncoders(encoders)) throw new Error('FFmpeg đi kèm thiếu bộ mã hóa H.264/AAC để tạo video xem trước tương thích.')
+      await fs.mkdir(directory, { recursive: true })
+      const tempOutput = path.join(directory, `${randomUUID()}.tmp.mp4`)
+      try {
+        await new Promise((resolve, reject) => {
+          const child = spawn(ffmpegPath, buildVideoPreviewArgs({ sourcePath: source, outputPath: tempOutput }), { shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] })
+          let stderr = ''
+          child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-8000) })
+          child.once('error', (error) => reject(new Error(`Không thể khởi động FFmpeg (${error.code ?? 'unknown'}): ${error.message}`)))
+          child.once('close', (code) => code === 0 ? resolve() : reject(new Error(`Không tạo được video xem trước: ${stderr.trim().slice(-1200)}`)))
+        })
+        const preview = await fs.stat(tempOutput)
+        if (!preview.size) throw new Error('FFmpeg không tạo được video xem trước hợp lệ.')
+        await fs.rename(tempOutput, output)
+      } finally {
+        await fs.rm(tempOutput, { force: true })
+      }
+      return pathToFileURL(output).toString()
+    })()
+    videoPreviewJobs.set(key, operation)
+    try { return await operation } finally { if (videoPreviewJobs.get(key) === operation) videoPreviewJobs.delete(key) }
+  })
+  ipcMain.handle('media-fingerprint', async (_event, filePath) => getTranscriptionCache().fingerprintFor(ensureFile(filePath)))
+  ipcMain.handle('media-signature', async (_event, filePath) => {
+    const stats = fsSync.statSync(ensureFile(filePath))
+    return { size: stats.size, modifiedAtMs: stats.mtimeMs }
+  })
+  ipcMain.handle('load-cached-transcript', async (_event, key) => {
+    if (typeof key !== 'string' || !/^[a-f\d]{64}$/i.test(key)) return null
+    return getTranscriptionCache().read(key)
+  })
   ipcMain.handle('read-text-file', async (_event, filePath) => fs.readFile(ensureFile(filePath), 'utf8'))
   ipcMain.handle('open-project', async () => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile'], filters: [{ name: 'Kara Studio project', extensions: ['kara.json', 'json'] }] })
@@ -460,6 +638,9 @@ function registerIpc() {
     await fs.writeFile(target, JSON.stringify(project, null, 2), 'utf8')
     return { path: target }
   })
+  ipcMain.handle('load-recovery-project', () => getRecoveryStore().load())
+  ipcMain.handle('save-recovery-project', (_event, project) => getRecoveryStore().save(project))
+  ipcMain.handle('clear-recovery-project', () => getRecoveryStore().clear())
   ipcMain.handle('save-export', async (_event, format, content, suggestedName) => {
     const result = await dialog.showSaveDialog(mainWindow, { defaultPath: suggestedName, filters: [{ name: format.toUpperCase(), extensions: [format] }] })
     if (result.canceled || !result.filePath) return null
@@ -469,17 +650,89 @@ function registerIpc() {
   })
   ipcMain.handle('load-provider-settings', async () => {
     const settings = await readSettings()
-    return { profile: settings.profile, apiKeyPresent: Boolean(settings.encryptedApiKey) }
+    return { profile: settings.profile }
   })
-  ipcMain.handle('save-provider-settings', async (_event, profile, apiKey) => writeSettings(profile, apiKey))
-  ipcMain.handle('transcribe', async (_event, profile, audioPath, lyricsText) => callProvider(profile, audioPath, lyricsText))
+  ipcMain.handle('save-provider-settings', async (_event, profile) => writeSettings(profile))
+  ipcMain.handle('check-local-runtime', async (_event, profile) => checkLocalRuntime(profile))
+  ipcMain.handle('separate-vocals', async (event, jobId, audioPath, preferredPython) => {
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    if (typeof jobId !== 'string' || !jobId || !owner || owner.isDestroyed()) throw new Error('Yêu cầu tách vocal không hợp lệ.')
+    const job = { id: jobId, owner, child: null, canceled: false, abortController: new AbortController(), finished: null }
+    separationJobs.register(job)
+    try {
+      const operation = separateVocals(audioPath, preferredPython, job)
+      job.finished = operation
+      const result = await operation
+      if (job.canceled) throw new Error('Đã hủy tách vocal.')
+      return { ...result, vocalsUrl: `kara-media://local/${encodeURIComponent(ensureFile(result.vocalsPath))}`, instrumentalUrl: `kara-media://local/${encodeURIComponent(ensureFile(result.instrumentalPath))}` }
+    } finally {
+      separationJobs.finish(job)
+      separationJobs.delete(jobId)
+    }
+  })
+  ipcMain.handle('cancel-separation', (event, jobId) => {
+    const job = separationJobs.get(jobId)
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    if (job && owner && job.owner === owner) cancelTranscriptionJob(job)
+  })
+  ipcMain.handle('transcribe', async (event, jobId, profile, audioPath, lyricsText) => {
+    profile = normalizeProviderProfile(profile)
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    const job = { id: jobId, owner, child: null, canceled: false, abortController: new AbortController(), finished: null }
+    if (typeof jobId !== 'string' || !jobId) throw new Error('Mã nhận dạng không hợp lệ hoặc đang được sử dụng.')
+    if (!owner || owner.isDestroyed()) throw new Error('Cửa sổ nhận dạng không còn hoạt động.')
+    transcriptionJobs.register(job)
+    try {
+      let cacheKey
+      let audioFingerprint
+      let audioSignature
+      let cachePersisted = false
+      try {
+        const cache = getTranscriptionCache()
+        const resolvedAudioPath = ensureFile(audioPath)
+        audioFingerprint = await cache.fingerprintFor(resolvedAudioPath)
+        const stats = fsSync.statSync(resolvedAudioPath)
+        audioSignature = { size: stats.size, modifiedAtMs: stats.mtimeMs }
+        cacheKey = await cache.keyFor(resolvedAudioPath, profile, lyricsText, '', app.getVersion(), audioFingerprint)
+        const cached = await getTranscriptionCache().read(cacheKey)
+        if (cached) {
+          if (job.canceled) throw new Error('Đã hủy nhận dạng.')
+          return { ...cached, cacheHit: true, audioFingerprint, audioSignature, transcriptCacheKey: cacheKey }
+        }
+      } catch (error) {
+        if (job.canceled) throw error
+        cacheKey = undefined
+      }
+      const operation = callProvider(profile, audioPath, lyricsText, (progress) => {
+        if (!owner || owner.isDestroyed() || owner.webContents.isDestroyed()) return
+        owner.webContents.send('transcribe-progress', { jobId, ...progress })
+      }, job)
+      job.finished = operation
+      const result = await operation
+      if (job.canceled) throw new Error('Đã hủy nhận dạng.')
+      if (cacheKey) cachePersisted = await getTranscriptionCache().write(cacheKey, result).then(() => true, () => false)
+      return { ...result, cacheHit: false, audioFingerprint, audioSignature, transcriptCacheKey: cachePersisted ? cacheKey : undefined }
+    } finally {
+      transcriptionJobs.finish(job)
+      transcriptionJobs.delete(jobId)
+    }
+  })
+  ipcMain.handle('cancel-transcribe', (event, jobId) => {
+    const job = transcriptionJobs.get(jobId)
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    if (job && owner && job.owner === owner) {
+      job.canceled = true
+      job.abortController.abort()
+      if (job.child && !job.child.killed) job.child.kill()
+    }
+  })
   ipcMain.handle('start-render', async (event, rawRequest) => {
     const request = validateRenderRequest(rawRequest)
     if (renderJobs.has(request.jobId)) throw new Error('Render này đang chạy.')
     const owner = BrowserWindow.fromWebContents(event.sender)
     if (!owner || owner.isDestroyed()) throw new Error('Cửa sổ render không còn hoạt động.')
     const job = { id: request.jobId, owner, outputPath: null, tempPath: null, subtitlePath: null, child: null, canceled: false, closed: false, ffmpegClosed: false, finished: null }
-    renderJobs.set(job.id, job)
+    renderJobs.register(job)
     const operation = (async () => {
       try {
         const audioPath = ensureFile(request.audioPath)
@@ -500,6 +753,7 @@ function registerIpc() {
         return await runRenderJob(owner, { ...request, audioPath, backgroundPath }, outputPath, ffmpegPath, job)
       } finally {
         job.closed = true
+        renderJobs.finish(job)
         if (renderJobs.get(job.id) === job) renderJobs.delete(job.id)
       }
     })()
@@ -519,7 +773,17 @@ app.whenReady().then(() => {
   protocol.handle('kara-media', (request) => {
     const encodedPath = request.url.replace('kara-media://local/', '')
     const target = ensureFile(decodeURIComponent(encodedPath))
-    return net.fetch(pathToFileURL(target).toString())
+    const mimeType = path.extname(target).toLowerCase() === '.webm'
+      ? 'video/webm'
+      : path.extname(target).toLowerCase() === '.wav'
+        ? 'audio/wav'
+        : undefined
+    return net.fetch(pathToFileURL(target).toString()).then((response) => {
+      if (!mimeType || !response.ok) return response
+      const headers = new Headers(response.headers)
+      headers.set('content-type', mimeType)
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+    })
   })
   registerIpc()
   createWindow()
@@ -527,10 +791,14 @@ app.whenReady().then(() => {
 })
 app.on('before-quit', (event) => {
   const jobs = [...renderJobs.values()]
-  if (!jobs.length || quitRequested) return
+  const transcriptionTasks = [...transcriptionJobs.values()]
+  const separationTasks = [...separationJobs.values()]
+  if ((!jobs.length && !transcriptionTasks.length && !separationTasks.length) || quitRequested) return
   quitRequested = true
   event.preventDefault()
-  for (const job of jobs) cancelRenderJob(job)
-  void Promise.all(jobs.map((job) => job.finished ?? Promise.resolve())).then(() => app.quit())
+  renderJobs.cancelAll(cancelRenderJob)
+  transcriptionJobs.cancelAll(cancelTranscriptionJob)
+  separationJobs.cancelAll(cancelTranscriptionJob)
+  void Promise.all([renderJobs.waitForIdle(), transcriptionJobs.waitForIdle(), separationJobs.waitForIdle()]).then(() => app.quit())
 })
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

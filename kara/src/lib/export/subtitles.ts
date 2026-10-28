@@ -1,5 +1,6 @@
 import type { ExportOptions, LyricSegment, SpeakerRole, VideoSettings } from '../../../shared/contracts'
-import { DEFAULT_VIDEO_SETTINGS } from '../../../shared/contracts'
+import { countdownCues } from '../../engine/karaokePresentation'
+import { DEFAULT_VIDEO_SETTINGS, SPEAKER_COLORS } from '../../../shared/contracts'
 import { formatTimecode } from '../timecode'
 
 const ROLE_PREFIX: Record<SpeakerRole, string> = {
@@ -49,16 +50,16 @@ function karaokeText(segment: LyricSegment, enabled: boolean, dialogueStart = se
     .filter((word) => word.text.trim() && word.end > word.start)
     .sort((a, b) => a.start - b.start || a.end - b.end)
   if (!words.length) return assEscape(segment.text)
-  let cursor = dialogueStart
+  let cursor = Math.round(dialogueStart * 100)
   return words.map((word, index) => {
-    const effectiveStart = Math.max(cursor, word.start)
-    const gap = Math.max(0, Math.round((effectiveStart - cursor) * 100))
-    const end = Math.max(effectiveStart + 0.01, word.end)
-    const duration = Math.max(1, Math.round((end - effectiveStart) * 100))
-    cursor = Math.max(cursor, end)
+    const effectiveStart = Math.max(cursor, Math.round(word.start * 100))
+    const end = Math.max(effectiveStart + 1, Math.round(word.end * 100))
+    const gap = effectiveStart - cursor
+    const duration = end - effectiveStart
+    cursor = end
     const separator = index === 0 || gap > 0 ? '' : ' '
     const gapSyllable = gap > 0 ? `{\\k${gap}} ` : ''
-    return `${separator}${gapSyllable}{\\k${duration}}${assEscape(word.text)}`
+    return `${separator}${gapSyllable}{\\kf${duration}}${assEscape(word.text)}`
   }).join('')
 }
 
@@ -67,6 +68,13 @@ const ROLE_STYLE: Record<SpeakerRole, string> = {
   female: 'Female',
   duet: 'Duet',
   unknown: 'Default',
+}
+
+function assColor(value: string): string {
+  const match = value.match(/^#([0-9a-f]{6})$/i)
+  if (!match) return '&H00FFFFFF'
+  const hex = match[1]
+  return `&H00${hex.slice(4, 6)}${hex.slice(2, 4)}${hex.slice(0, 2)}`.toUpperCase()
 }
 
 export function buildAss(segments: LyricSegment[], options: ExportOptions, videoSettings: VideoSettings = DEFAULT_VIDEO_SETTINGS): string {
@@ -81,21 +89,41 @@ export function buildAss(segments: LyricSegment[], options: ExportOptions, video
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    'Style: Default,Arial,64,&H00FFFFFF,&H0000E7FF,&H00110B20,&HAA110B20,1,0,1,3,0,2,80,80,70,1',
-    'Style: Male,Arial,64,&H00FFFFFF,&H006D8CFF,&H00110B20,&HAA110B20,1,0,1,3,0,2,80,80,70,1',
-    'Style: Female,Arial,64,&H00FFFFFF,&H00F18BCB,&H00110B20,&HAA110B20,1,0,1,3,0,2,80,80,70,1',
-    'Style: Duet,Arial,64,&H00FFFFFF,&H00F5C76B,&H00110B20,&HAA110B20,1,0,1,3,0,2,80,80,70,1',
+    `Style: Default,Arial,${Math.round(64 * videoSettings.width / 1920)},&H00FFFFFF,${assColor(SPEAKER_COLORS.unknown)},&H00110B20,&HAA110B20,1,0,1,3,0,2,80,80,70,1`,
+    `Style: Male,Arial,${Math.round(64 * videoSettings.width / 1920)},&H00FFFFFF,${assColor(SPEAKER_COLORS.male)},&H00110B20,&HAA110B20,1,0,1,3,0,2,80,80,70,1`,
+    `Style: Female,Arial,${Math.round(64 * videoSettings.width / 1920)},&H00FFFFFF,${assColor(SPEAKER_COLORS.female)},&H00110B20,&HAA110B20,1,0,1,3,0,2,80,80,70,1`,
+    `Style: Duet,Arial,${Math.round(64 * videoSettings.width / 1920)},&H00FFFFFF,${assColor(SPEAKER_COLORS.duet)},&H00110B20,&HAA110B20,1,0,1,3,0,2,80,80,70,1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
   ]
-  for (const segment of segments) {
+  const ordered = segments.filter((segment) => segment.text.trim()).slice().sort((a, b) => a.start - b.start || a.end - b.end)
+  const x = Math.round(videoSettings.lyricPosition.x * videoSettings.width)
+  const y = Math.round(videoSettings.lyricPosition.y * videoSettings.height)
+  const teaserY = Math.max(0, Math.round(y - videoSettings.height * 0.075))
+  for (let index = 0; index < ordered.length; index += 1) {
+    const segment = ordered[index]
     if (!segment.text.trim()) continue
     const start = Math.max(0, segment.start - options.leadInMs / 1000)
     const end = Math.max(start + 0.05, segment.end + options.leadOutMs / 1000)
     const prefix = options.includeSpeakerPrefix ? ROLE_PREFIX[segment.speakerRole] : ''
-    const text = `{\\an5\\pos(${Math.round(videoSettings.lyricPosition.x * videoSettings.width)},${Math.round(videoSettings.lyricPosition.y * videoSettings.height)})}${assEscape(prefix)}${karaokeText(segment, options.includeKaraokeTags, start)}`
+    const text = `{\\an5\\pos(${x},${y})}${assEscape(prefix)}${karaokeText(segment, options.includeKaraokeTags, start)}`
     lines.push(`Dialogue: 0,${formatAssTimecode(start)},${formatAssTimecode(end)},${ROLE_STYLE[segment.speakerRole]},,0,0,0,,${text}`)
+
+    const next = ordered[index + 1]
+    if (next && next.start > segment.start) {
+      const teaserStart = Math.max(0, segment.start - options.leadInMs / 1000)
+      const teaserEnd = Math.max(teaserStart + 0.05, Math.min(segment.end, next.start - 0.01) + options.leadOutMs / 1000)
+      if (teaserEnd > teaserStart) {
+        const nextPrefix = options.includeSpeakerPrefix ? ROLE_PREFIX[next.speakerRole] : ''
+        const teaser = `{\\an5\\pos(${x},${teaserY})\\alpha&H50&}${assEscape(nextPrefix + cleanText(next.text))}`
+        lines.push(`Dialogue: 1,${formatAssTimecode(teaserStart)},${formatAssTimecode(teaserEnd)},${ROLE_STYLE[next.speakerRole]},,0,0,0,,${teaser}`)
+      }
+      for (const cue of countdownCues(segment, next, options.leadInMs, options.leadOutMs)) {
+        const text = `{\\an5\\pos(${x},${teaserY})\\alpha&H20&\\fs${Math.max(20, Math.round(70 * videoSettings.width / 1920))}}${cue.value}`
+        lines.push(`Dialogue: 2,${formatAssTimecode(cue.start)},${formatAssTimecode(cue.end)},${ROLE_STYLE[next.speakerRole]},,0,0,0,,${text}`)
+      }
+    }
   }
   return lines.join('\n')
 }

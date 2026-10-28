@@ -1,7 +1,11 @@
-export type MediaKind = 'full' | 'beat' | 'lyrics' | 'background'
+export type MediaKind = 'full' | 'beat' | 'vocal' | 'lyrics' | 'background'
 export type SpeakerRole = 'male' | 'female' | 'duet' | 'unknown'
-export type ProviderKind = 'mock' | 'local' | 'deepgram' | 'custom'
+export type ProviderKind = 'mock' | 'local'
+export type AnalysisProviderKind = ProviderKind | 'legacy'
+export type LocalSource = 'original' | 'vocal' | 'auto'
 export type ExportFormat = 'srt' | 'ass'
+export type TimingOrigin = 'manual' | 'asr' | 'aligned' | 'estimated'
+export type ReviewReason = 'estimated-timing' | 'recognition-timing' | 'low-text-match' | 'empty-timing' | 'manual-edit' | 'explicit' | 'reviewed'
 
 export type TimedWord = {
   id: string
@@ -9,6 +13,8 @@ export type TimedWord = {
   start: number
   end: number
   confidence?: number
+  origin?: TimingOrigin
+  timingLocked?: boolean
 }
 
 export type LyricSegment = {
@@ -21,6 +27,10 @@ export type LyricSegment = {
   words: TimedWord[]
   confidence?: number
   needsReview?: boolean
+  reviewReason?: ReviewReason
+  reviewStatus?: 'pending' | 'listened' | 'edited' | 'explicitly-accepted'
+  origin?: TimingOrigin
+  timingLocked?: boolean
 }
 
 export type MediaAsset = {
@@ -31,6 +41,9 @@ export type MediaAsset = {
   mimeType?: string
   duration?: number
   url?: string
+  derivedFrom?: string
+  derivedKind?: 'video-audio' | 'separation-vocal' | 'separation-instrumental'
+  processing?: 'separating' | 'ready' | 'error'
 }
 
 export type SpeakerProfile = {
@@ -42,14 +55,15 @@ export type SpeakerProfile = {
 
 export type ProviderProfile = {
   kind: ProviderKind
-  endpoint: string
   model: string
   language: string
-  diarize: boolean
   localModelPath?: string
+  localPythonPath?: string
   localDevice?: 'auto' | 'cpu' | 'cuda'
-  customSegmentsPath?: string
-  customWordsPath?: string
+  useForcedAlignment?: boolean
+  alignmentModelPath?: string
+  localSource?: LocalSource
+  useVocalSeparation?: boolean
 }
 
 export type ExportOptions = {
@@ -57,6 +71,20 @@ export type ExportOptions = {
   includeKaraokeTags: boolean
   leadInMs: number
   leadOutMs: number
+}
+
+export type TimeAnchor = { sourceTime: number; timelineTime: number }
+
+export type AssetTimeMapping = {
+  assetId: string
+  anchors: TimeAnchor[]
+}
+
+export type TrackTimeMapping = {
+  analysisAssetId?: string
+  playbackAssetId?: string
+  renderAssetId?: string
+  assetMappings: AssetTimeMapping[]
 }
 
 export type NormalizedPosition = { x: number; y: number }
@@ -86,7 +114,9 @@ export type RenderProgress = {
 export type RenderResult = { path: string } | null
 
 export type KaraProject = {
-  schemaVersion: 1
+  schemaVersion: 3
+  projectId: string
+  revision: number
   title: string
   createdAt: string
   updatedAt: string
@@ -95,16 +125,22 @@ export type KaraProject = {
   speakers: SpeakerProfile[]
   provider: ProviderProfile
   exportOptions: ExportOptions
+  trackTimeMapping: TrackTimeMapping
+  analysisSnapshot?: AnalysisSnapshot
   video?: VideoSettings
 }
 
-export type ProviderRequest = {
-  audioPath: string
-  lyricsText?: string
-  language: string
-  model: string
-  diarize: boolean
-  endpoint?: string
+export type AnalysisSnapshot = {
+  transcript?: NormalizedTranscript
+  transcriptCacheKey?: string
+  sourceAssetId?: string
+  sourcePath?: string
+  sourceFingerprint?: string
+  sourceSignature?: { size: number; modifiedAtMs: number }
+  sourceTimeAnchors?: TimeAnchor[]
+  mappingKey: string
+  providerKind: AnalysisProviderKind
+  capturedAt: string
 }
 
 export type NormalizedTranscript = {
@@ -118,6 +154,13 @@ export type NormalizedTranscript = {
     words: TimedWord[]
   }>
   duration?: number
+  timingMethod?: 'asr' | 'forced-alignment'
+  device?: 'cpu' | 'cuda'
+  deviceFallbackReason?: string
+  cacheHit?: boolean
+  audioFingerprint?: string
+  audioSignature?: { size: number; modifiedAtMs: number }
+  transcriptCacheKey?: string
 }
 
 export const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
@@ -129,12 +172,8 @@ export const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
 
 export const DEFAULT_PROVIDER: ProviderProfile = {
   kind: 'mock',
-  endpoint: 'https://api.deepgram.com/v1/listen',
-  model: 'nova-3',
+  model: 'small',
   language: 'vi',
-  diarize: true,
-  customSegmentsPath: 'results.channels[0].alternatives[0].paragraphs.paragraphs',
-  customWordsPath: 'results.channels[0].alternatives[0].words',
 }
 
 export const DEFAULT_EXPORT_OPTIONS: ExportOptions = {

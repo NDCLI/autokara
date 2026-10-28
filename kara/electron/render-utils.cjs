@@ -70,6 +70,27 @@ function validateVideo(video) {
   }
 }
 
+function supportsRequiredEncoders(encoderList) {
+  return typeof encoderList === 'string'
+    && /\blibx264\b/.test(encoderList)
+    && /^\s*A[A-Z.]{5}\s+aac\b/m.test(encoderList)
+}
+
+function supportsBrowserPreviewEncoders(encoderList) {
+  return supportsRequiredEncoders(encoderList)
+}
+
+function buildVideoPreviewArgs({ sourcePath, outputPath }) {
+  return [
+    '-hide_banner', '-nostdin', '-y', '-i', path.resolve(sourcePath),
+    '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn',
+    '-vf', 'scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=20',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-threads', '2', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', '-f', 'mp4',
+    path.resolve(outputPath),
+  ]
+}
+
 function buildFfmpegArgs({ audioPath, backgroundPath, subtitlePath, outputPath, video }) {
   validateVideo(video)
   const color = video.backgroundColor.slice(1)
@@ -108,4 +129,4 @@ function parseProgressLine(line, duration) {
   return { percent, status: `Đang mã hóa · ${percent}%` }
 }
 
-module.exports = { assertOutputDoesNotMatchInputs, buildFfmpegArgs, escapeFilterPath, parseProgressLine, publishRenderOutput }
+module.exports = { assertOutputDoesNotMatchInputs, buildFfmpegArgs, buildVideoPreviewArgs, escapeFilterPath, parseProgressLine, publishRenderOutput, supportsBrowserPreviewEncoders, supportsRequiredEncoders }

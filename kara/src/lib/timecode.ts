@@ -15,6 +15,7 @@ export function parseTimecode(value: string): number | null {
 }
 
 export function formatClock(seconds: number): string {
+  if (!Number.isFinite(seconds)) return '00:00.00'
   const value = Math.max(0, seconds)
   const mins = Math.floor(value / 60)
   const secs = Math.floor(value % 60)

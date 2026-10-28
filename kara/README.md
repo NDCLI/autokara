@@ -9,6 +9,16 @@ Windows-first lyric timing editor for karaoke subtitles.
 
 No C++ build tools or native audio modules are required. The desktop package uses Electron and `electron-packager` rather than NSIS/symlink-based installer tooling.
 
+## Quick karaoke workflow
+
+1. Import a full vocal track, or import a video from **Hình nền**. For desktop video projects, use **Trích audio từ video** to create a separate WAV for playback and local recognition.
+2. Import prepared lyrics as TXT/LRC/SRT/ASS, or select **Nhận dạng** to run the configured local Whisper model. **Demo offline** only creates sample/estimated timing; it does not listen to the song.
+3. Use **Đồng bộ track** to choose the audio used for analysis, playback and final render. Check every item in **Cần nghe xác nhận** by playing its slow loop; timing or text edits return affected lines to review.
+4. Adjust line and word timing in the timeline or record words with the playback controls. Lock timing that has been checked.
+5. Set lyric position and preview width, then render the MP4 or export SRT/ASS. The preview width is independent of the rendered output resolution.
+
+Drag the thin dividers beside the source and properties panels to adjust their widths. Use the arrow keys when a divider is focused, or double-click it to restore its default width; both widths are saved between sessions.
+
 ## Run in browser
 
 ```bash
@@ -22,7 +32,7 @@ Browser preview supports local audio/lyrics import, manual timing edits, demo ti
 
 The preview follows the same HTML audio clock used by the transport. It highlights the active lyric line and, when word timing exists, the current word. The lyric anchor is normalized to the video frame, so its position remains consistent between the preview and the generated ASS subtitles. The preview also exposes output resolution presets/custom dimensions and the background color used for generated backgrounds and video padding.
 
-Import a video from **Hình nền** to use it as the render background. If that video contains an audio stream and no full-song or beat track is imported, Kara Studio uses the video's audio for playback and rendering; an imported full-song track takes precedence over the video's audio. When a video has no usable audio, import a separate audio track before rendering.
+Import a video from **Hình nền** to preview it and use it as the render background. If Chromium cannot decode the source, desktop mode creates a cached 640×360 H.264/AAC preview proxy while keeping the original video for final rendering. In desktop mode, **Trích audio từ video** creates a WAV track that can be played, analyzed locally, aligned, and selected for render. Without extraction, the video's own audio can still play/render when there are no separate audio tracks. The **Đồng bộ track** panel lets you choose analysis, playback and render sources independently and add timestamp anchors to align offset or tempo drift. The preview size can be changed independently with its width field or slider; height follows the selected output aspect ratio.
 
 Rendering uses the configured frame size and background, burns ASS karaoke subtitles, and encodes H.264 video with AAC audio in a fast-start MP4. A missing FFmpeg executable or required `subtitles`, `libx264`, or `aac` capability is reported as a safe application error rather than executing a fallback download.
 
@@ -33,7 +43,7 @@ npm install
 npm run desktop:dev
 ```
 
-The renderer can play MP3, WAV, M4A, AAC, FLAC, OGG and WebM formats supported by Chromium. Import the full song as the transcription source; the beat track is kept as a separate playback/reference track.
+The renderer can play MP3, WAV, M4A, AAC, FLAC, OGG and WebM formats supported by Chromium. The local Whisper source preference selects the analysis track by default; the **Đồng bộ track** panel can explicitly choose another analysis asset. All chosen sources remain separate assets and are mapped to the project timeline.
 
 ## Build and package for Windows
 
@@ -49,34 +59,25 @@ The unpacked app is written under `release/KaraStudio-win32-x64`. `electron-pack
 
 ## Recognition providers
 
-The offline demo never sends audio. **Whisper local** runs Faster-Whisper in a separate Python worker and returns word-level timestamps from the imported full audio; it does not separate vocals, use UVR/MDX models, or require an API key. The worker currently expects Python 3 plus `faster-whisper` to be installed and can use a model name (`tiny`, `base`, `small`, or `medium`) or a local model directory. For a development setup:
+The offline demo never sends audio. **Whisper local** runs Faster-Whisper in a separate Python worker and returns word-level timestamps from the selected analysis audio. The worker expects Python 3 plus Faster-Whisper and can use a model name (`tiny`, `base`, `small`, `medium`, or `large-v3-turbo`) or a local model directory. Large-v3-turbo is best supplied as a local model directory; it is heavier than medium and remains subject to CPU/GPU memory. The reproducible Windows x64 CPU setup is Python 3.12.10 with pinned dependencies from `runtime/windows-python312-cpu-requirements.lock.txt`:
 
-```bash
-python -m pip install faster-whisper
+```powershell
+.\scripts\setup-local-runtime.ps1
 ```
+
+If Python 3.12 is installed outside the Python launcher, pass its executable explicitly: `.\scripts\setup-local-runtime.ps1 -PythonPath 'C:\Path\To\Python312\python.exe'`. Python 3.15 is outside the tested range and currently lacks compatible PyAV wheels for this dependency set; pip then falls back to compiling old PyAV sources and can fail in Cython. Keep 3.15 installed if you need it; install 3.12 side by side for Kara Studio. Then select `.venv-kara\Scripts\python.exe` in Kara Studio's local recognition settings and run **Kiểm tra runtime**. This clean-venv installation and worker health check were verified on Windows x64; a real 45-second song excerpt also produced word timestamps on CPU. Python 3.10/3.11, other operating systems, GPU inference and transcript accuracy are not covered by this profile. The worker has a compatibility adapter for PyAV 19, whose release removed metadata arguments used by Faster-Whisper 1.2.1.
+
+To separate a full mix into vocal and instrumental stems, install optional `demucs` into the same Python environment (`python -m pip install demucs`) and use **Tách vocal + beat** under the audio sources. Separation runs locally, keeps both WAV stems in the app cache, and selects vocal for analysis and instrumental for render. Demucs may download its pretrained model the first time it runs; install the model/cache beforehand for offline use.
 
 Select **Whisper local** in Recognition settings, choose the language (for Vietnamese use `vi`), and run **Căn timestamp local**. The first model load may download several hundred MB to the Faster-Whisper/Hugging Face cache. For a packaged offline deployment, provide a verified Python/worker runtime and model separately; the current Electron package intentionally does not embed multi-GB model weights. If the runtime or model is missing, the app reports that explicitly instead of falling back to fake timestamps.
 
-Deepgram and compatible custom HTTP JSON providers run through Electron's main process; API keys are stored outside project files and encrypted with Electron `safeStorage` when available. A custom endpoint receives the selected audio bytes as `application/octet-stream` and should return a JSON object with a `segments` array:
+After recognition, lines with ASR word timestamps stay in **Cần nghe xác nhận** even when their lyric text matches: ASR text confidence does not certify karaoke onset/offset accuracy. Estimated timings and empty word timings are marked separately. The review queue can play a line in a slow loop, then confirm it or explicitly accept it as a draft; only then does the guided flow continue to preview/render. Each word shows its timing source (ASR, experimental alignment, estimate, or manual). Editing a line returns it to review. Offline demo timing is an estimate for trying the UI and is never treated as verified audio timing.
 
-```json
-{
-  "segments": [
-    {
-      "text": "Một câu lời hát",
-      "start": 1.2,
-      "end": 3.8,
-      "speaker": "speaker_0",
-      "confidence": 0.96,
-      "words": [
-        { "word": "Một", "start": 1.2, "end": 1.5, "confidence": 0.98 }
-      ]
-    }
-  ]
-}
-```
+In desktop mode, use **Kiểm tra runtime** in the local provider settings before transcribing. It reports the selected Python executable/version, whether Faster-Whisper and optional WhisperX are installed, and the CUDA device count. This check does not load model weights or read audio. If multiple Python installations are present, set **Python executable** to the interpreter in the environment containing the required packages; the same interpreter is used for subsequent recognition and cache separation.
 
-The `segments` JSON path can be configured. XPiki is not presented as an STT provider until an audio transcription endpoint and its response shape are confirmed.
+The **Căn tinh WhisperX (thử nghiệm)** option is off by default. When enabled, the worker runs a second forced-alignment pass over the ASR transcript. Install WhisperX in the same Python environment (`python -m pip install whisperx`); the language alignment model may download on first use. Vietnamese has a model mapping in WhisperX, but singing accuracy is not benchmarked in this app. The worker keeps ASR timestamps when alignment confidence is too low, too few words are placed, timestamps fall outside the source segment, or the output is invalid; those words remain in the review queue. A local probe of the Vietnamese model on a sung sample collapsed timestamps near the window start, so do not treat the optional aligner as verified. See the [WhisperX alignment guide](https://github.com/m-bain/whisperX#python-usage-) and [language model mapping](https://github.com/m-bain/whisperX/blob/main/whisperx/alignment.py).
+
+Recognition has no third-party API endpoint configuration and the app does not load fonts or send media to a remote service. Existing projects that selected an online provider open with **Demo offline**; saved endpoint and credential settings are removed when desktop settings are migrated. Whisper local analyzes audio on the computer. Its model may still need a one-time download unless installed locally.
 
 ## Project portability
 

@@ -1,0 +1,73 @@
+{
+  "manifestVersion": 1,
+  "runtime": {
+    "python": {
+      "minimum": "3.10",
+      "maximumExclusive": "3.13",
+      "supported": [
+        "3.10",
+        "3.11",
+        "3.12"
+      ]
+    },
+    "packages": {
+      "faster-whisper": {
+        "distribution": "faster-whisper",
+        "module": "faster_whisper",
+        "required": true,
+        "testedVersion": "1.2.1",
+        "versionPolicy": "tested-on-python-3.12-windows-cpu"
+      },
+      "av": {
+        "distribution": "av",
+        "module": "av",
+        "required": true,
+        "testedVersion": "19.0.2",
+        "versionPolicy": "tested-on-python-3.12-windows-cpu"
+      },
+      "ctranslate2": {
+        "distribution": "ctranslate2",
+        "module": "ctranslate2",
+        "required": true,
+        "testedVersion": "4.8.4",
+        "versionPolicy": "tested-on-python-3.12-windows-cpu"
+      },
+      "whisperx": {
+        "distribution": "whisperx",
+        "module": "whisperx",
+        "required": false,
+        "versionPolicy": "unverified",
+        "requiredWhen": "forced-alignment-enabled"
+      },
+      "demucs": {
+        "distribution": "demucs",
+        "module": "demucs",
+        "required": false,
+        "versionPolicy": "unverified",
+        "requiredWhen": "vocal-separation-enabled"
+      }
+    },
+    "models": {
+      "asr": "selected-by-user",
+      "forcedAlignment": "selected-by-language-or-user"
+    },
+    "testedProfiles": [
+      {
+        "id": "windows-x64-python-3.12-cpu",
+        "requirements": "runtime/windows-python312-cpu-requirements.lock.txt",
+        "python": "3.12.10",
+        "packages": {
+          "ctranslate2": "4.8.4",
+          "faster-whisper": "1.2.1",
+          "av": "19.0.2"
+        }
+      }
+    ]
+  },
+  "notes": [
+    "Recreate the verified CPU environment with: python -m venv .venv; .venv\\Scripts\\python -m pip install -r runtime/windows-python312-cpu-requirements.lock.txt. Select that interpreter in Kara Studio.",
+    "The verified Windows x64 CPU profile is Python 3.12.10, faster-whisper 1.2.1, PyAV 19.0.2 and CTranslate2 4.8.4; Python 3.10/3.11, other operating systems and GPU inference are not covered by this profile.",
+    "Model revisions are selected by the user and are not pinned; report them at runtime before treating a run as reproducible.",
+    "CUDA availability is detected from CTranslate2 and does not guarantee that a selected model can load on the device."
+  ]
+}

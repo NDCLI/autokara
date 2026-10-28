@@ -14,6 +14,7 @@ export function transcriptToSegments(transcript: NormalizedTranscript): LyricSeg
     words: segment.words,
     confidence: segment.confidence,
     needsReview: (segment.confidence ?? 1) < 0.68,
+    origin: 'asr',
   }))
 }
 
@@ -39,9 +40,8 @@ export function mockTranscriptFromLyrics(lines: Array<{ text: string; start?: nu
   return { segments }
 }
 
-export function roleForSpeaker(speakerId?: string): SpeakerRole {
-  if (!speakerId) return 'unknown'
-  return speakerId.toLocaleLowerCase().includes('1') ? 'female' : 'male'
+export function roleForSpeaker(_speakerId?: string): SpeakerRole {
+  return 'unknown'
 }
 
 export function speakerColor(role: SpeakerRole): string {

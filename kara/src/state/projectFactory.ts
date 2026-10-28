@@ -42,7 +42,9 @@ export function createNewProject(defaults: {
     { id: 'speaker_1', label: 'Nữ', role: 'female', color: SPEAKER_COLORS.female },
   ]
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
+    projectId: makeId(),
+    revision: 0,
     title: 'Bản nháp mới',
     createdAt: now,
     updatedAt: now,
@@ -51,6 +53,7 @@ export function createNewProject(defaults: {
     speakers,
     provider: { ...defaults.provider },
     exportOptions: { ...defaults.exportOptions },
+    trackTimeMapping: { assetMappings: [] },
     video: { ...DEFAULT_VIDEO_SETTINGS, lyricPosition: { ...DEFAULT_VIDEO_SETTINGS.lyricPosition } },
   }
 }
