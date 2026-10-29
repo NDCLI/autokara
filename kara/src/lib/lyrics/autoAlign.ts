@@ -390,14 +390,14 @@ export function alignTranscriptToLyrics(lines: ParsedLyric[], transcript: Normal
     const origin: TimingOrigin = timingShifted ? 'estimated' : matched
       ? matchedTokens.every((word) => word.origin === 'aligned') ? 'aligned' : matchedTokens.every((word) => word.origin === 'estimated') ? 'estimated' : 'asr'
       : line.start !== undefined || line.end !== undefined || line.words?.length ? 'manual' : 'estimated'
-    const forcedAlignmentIncomplete = transcript.timingMethod === 'forced-alignment' && words.some((word) => word.origin !== 'aligned' || (word.confidence ?? 0) < 0.68)
+    const directAlignmentIncomplete = transcript.timingMethod === 'direct-lyrics-alignment' && words.some((word) => word.origin !== 'aligned' || (word.confidence ?? 0) < 0.68)
     const reviewReasons: ReviewReason[] = []
     if (words.some((word) => word.origin === 'estimated')) reviewReasons.push('estimated-timing')
     if (timingShifted) reviewReasons.push('estimated-timing')
     if (matched && words.some((word) => word.origin === 'asr' || word.origin === 'aligned')) reviewReasons.push('recognition-timing')
     if (!matched || bestScore < 0.68) reviewReasons.push('low-text-match')
     if (!words.length) reviewReasons.push('empty-timing')
-    if (forcedAlignmentIncomplete) reviewReasons.push('recognition-timing')
+    if (directAlignmentIncomplete) reviewReasons.push('recognition-timing')
     const reasons = [...new Set(reviewReasons)]
     return { id, text: line.text, start, end: Math.max(start + 0.2, end), speakerRole: 'unknown', providerSpeakerId: matched?.speakerId, words, confidence: matched?.confidence ?? (matched ? bestScore : 0.25), needsReview: reasons.length > 0, reviewReason: reasons[0], origin }
   })

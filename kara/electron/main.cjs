@@ -45,6 +45,7 @@ function pythonCandidates(preferredExecutable) {
   if (process.env.KARA_PYTHON?.trim()) return [{ executable: process.env.KARA_PYTHON.trim(), prefix: [] }]
   return process.platform === 'win32'
     ? [
+        ...[path.join(app.getPath('userData'), 'runtime', 'Scripts', 'python.exe'), path.join(__dirname, '..', '.venv-kara', 'Scripts', 'python.exe')].filter((candidate) => fsSync.existsSync(candidate)).map((executable) => ({ executable, prefix: [] })),
         { executable: 'py', prefix: ['-3.12'] }, { executable: 'py', prefix: ['-3.11'] }, { executable: 'py', prefix: ['-3.10'] },
         { executable: 'python3.12', prefix: [] }, { executable: 'python3.11', prefix: [] }, { executable: 'python3.10', prefix: [] },
         { executable: 'python', prefix: [] }, { executable: 'py', prefix: ['-3'] },
@@ -64,7 +65,7 @@ const localWhisperWorker = () => {
 }
 
 const DEFAULT_PROVIDER = {
-  kind: 'mock',
+  kind: 'local',
   model: 'small',
   language: 'vi',
 }
@@ -78,12 +79,11 @@ function normalizeProviderProfile(value) {
     model: typeof source.model === 'string' ? source.model : DEFAULT_PROVIDER.model,
     language: typeof source.language === 'string' ? source.language : DEFAULT_PROVIDER.language,
   }
-  for (const key of ['localModelPath', 'localPythonPath', 'alignmentModelPath']) {
+  for (const key of ['localModelPath', 'localPythonPath']) {
     if (typeof source[key] === 'string') profile[key] = source[key]
   }
   if (['auto', 'cpu', 'cuda'].includes(source.localDevice)) profile.localDevice = source.localDevice
   if (['original', 'vocal', 'auto'].includes(source.localSource)) profile.localSource = source.localSource
-  if (typeof source.useForcedAlignment === 'boolean') profile.useForcedAlignment = source.useForcedAlignment
   if (typeof source.useVocalSeparation === 'boolean') profile.useVocalSeparation = source.useVocalSeparation
   return profile
 }
@@ -219,11 +219,15 @@ function spawnLocalWorker(args, onProgress, job, preferredExecutable) {
             if (message.type === 'progress') onProgress?.(message)
             if (message.type === 'result') {
               if (!isHealthCheck) return finish(null, message)
-              const score = Number(Boolean(message.pythonSupported)) * 2 + Number(Boolean(message.fasterWhisper?.available)) * 4 + Number(Boolean(message.demucs?.available)) * 4
-              const bestScore = bestHealthResult ? Number(Boolean(bestHealthResult.pythonSupported)) * 2 + Number(Boolean(bestHealthResult.fasterWhisper?.available)) * 4 + Number(Boolean(bestHealthResult.demucs?.available)) * 4 : -1
+              const score = Number(Boolean(message.pythonSupported)) * 2 + Number(Boolean(message.runtimeReady)) * 4 + Number(Boolean(message.stableWhisper?.available)) * 2 + Number(Boolean(message.demucs?.available))
+              const bestScore = bestHealthResult ? Number(Boolean(bestHealthResult.pythonSupported)) * 2 + Number(Boolean(bestHealthResult.runtimeReady)) * 4 + Number(Boolean(bestHealthResult.stableWhisper?.available)) * 2 + Number(Boolean(bestHealthResult.demucs?.available)) : -1
               if (score > bestScore) bestHealthResult = message
               const requirement = job.runtimeRequirement || 'fasterWhisper'
-              const requirementReady = requirement === 'fasterWhisper' ? message.runtimeReady : message[requirement]?.available
+              const requirementReady = requirement === 'directAlignment'
+                ? message.runtimeReady && message.stableWhisper?.available
+                : requirement === 'demucs'
+                  ? message.demucs?.available
+                  : message.runtimeReady
               if (message.pythonSupported && requirementReady) return finish(null, message)
               if (index >= candidates.length) return finish(null, bestHealthResult)
             }
@@ -266,12 +270,19 @@ async function callLocalWhisper(profile, audioPath, lyricsText, onProgress, job)
   const requestedModel = profile.localModelPath || profile.model
   const model = profile.localModelPath || (['tiny', 'base', 'small', 'medium', 'large-v3-turbo'].includes(requestedModel) ? requestedModel : 'small')
   const args = ['--audio', ensureFile(audioPath), '--model', model, '--language', profile.language || 'vi', '--device', profile.localDevice || 'auto']
-  if (lyricsText?.trim()) args.push('--prompt', lyricsText.slice(0, 4000))
-  if (profile.useForcedAlignment) {
-    args.push('--forced-align')
-    if (profile.alignmentModelPath?.trim()) args.push('--align-model', profile.alignmentModelPath.trim())
+  let lyricsDirectory
+  if (lyricsText?.trim()) {
+    lyricsDirectory = await fs.mkdtemp(path.join(app.getPath('temp'), 'kara-lyrics-'))
+    const lyricsFile = path.join(lyricsDirectory, 'lyrics.txt')
+    await fs.writeFile(lyricsFile, lyricsText, 'utf8')
+    args.push('--lyrics-file', lyricsFile)
   }
-  const result = await spawnLocalWorker(args, onProgress, job, profile.localPythonPath)
+  let result
+  try {
+    result = await spawnLocalWorker(args, onProgress, job, profile.localPythonPath)
+  } finally {
+    if (lyricsDirectory) await fs.rm(lyricsDirectory, { recursive: true, force: true })
+  }
   if (!Array.isArray(result.segments)) throw new Error('Worker local trả về dữ liệu timestamp không hợp lệ.')
   return { duration: result.duration, segments: result.segments, timingMethod: result.timingMethod, device: result.device, deviceFallbackReason: result.deviceFallbackReason }
 }
@@ -351,7 +362,7 @@ async function separateVocals(audioPath, preferredExecutable, job) {
   return { vocalsPath, instrumentalPath, cacheHit: false }
 }
 
-async function checkLocalRuntime(profile = {}, runtimeRequirement = 'fasterWhisper') {
+async function checkLocalRuntime(profile = {}, runtimeRequirement = 'directAlignment') {
   if (!fsSync.existsSync(localWhisperWorker())) throw new Error('Không tìm thấy worker timestamp local trong ứng dụng.')
   const job = { child: null, canceled: false, abortController: new AbortController(), runtimeRequirement }
   const result = await spawnLocalWorker(['--health-check'], undefined, job, profile.localPythonPath)
@@ -653,6 +664,14 @@ function registerIpc() {
     return { profile: settings.profile }
   })
   ipcMain.handle('save-provider-settings', async (_event, profile) => writeSettings(profile))
+  ipcMain.handle('pick-runtime-path', async (event, kind) => {
+    if (!['python', 'model'].includes(kind)) throw new Error('Loại đường dẫn không hợp lệ.')
+    const owner = BrowserWindow.fromWebContents(event.sender)
+    const result = await dialog.showOpenDialog(owner, kind === 'model'
+      ? { title: 'Chọn thư mục model Whisper', properties: ['openDirectory'] }
+      : { title: 'Chọn Python runtime', properties: ['openFile'], filters: [{ name: 'Python', extensions: ['exe'] }] })
+    return result.canceled ? null : result.filePaths[0]
+  })
   ipcMain.handle('check-local-runtime', async (_event, profile) => checkLocalRuntime(profile))
   ipcMain.handle('separate-vocals', async (event, jobId, audioPath, preferredPython) => {
     const owner = BrowserWindow.fromWebContents(event.sender)

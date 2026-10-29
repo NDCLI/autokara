@@ -66,11 +66,9 @@ if (-not $venvVersion.StartsWith('3.12.')) {
   throw "Môi trường đã tồn tại nhưng dùng Python $venvVersion. Xóa hoặc đổi -EnvironmentPath rồi chạy lại."
 }
 
-Write-Host 'Cài Faster-Whisper và các dependency đã khóa…'
+Write-Host 'Cài Faster-Whisper, Stable-ts và các dependency đã khóa…'
 & $venvPython -m pip install --disable-pip-version-check -r $requirements
 if ($LASTEXITCODE -ne 0) { throw 'Cài dependency thất bại. Xem lỗi pip ở phía trên rồi thử lại.' }
-
-Write-Host ''
 Write-Host 'Runtime local đã sẵn sàng.' -ForegroundColor Green
 Write-Host "Python: $venvPython"
 Write-Host 'Trong Kara Studio: Cấu hình nhận dạng → Python executable → chọn đường dẫn trên → Kiểm tra runtime.'

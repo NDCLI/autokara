@@ -84,7 +84,7 @@ export default function VideoPreview({ panelRef, segments, time, audioAvailable,
   const selectedPreset = RESOLUTION_PRESETS.find((preset) => preset.width === settings.width && preset.height === settings.height)
   const previewRatio = settings.width / settings.height
   const previewHeight = Math.round(previewWidth / previewRatio)
-  const style = { backgroundColor: settings.backgroundColor, aspectRatio: `${settings.width} / ${settings.height}`, width: `min(100%, ${previewWidth}px)`, justifySelf: 'start' } as CSSProperties
+  const style = { backgroundColor: settings.backgroundColor, aspectRatio: `${settings.width} / ${settings.height}`, width: `min(100%, ${previewWidth}px, ${20 * settings.width / settings.height}vh)`, justifySelf: 'center' } as CSSProperties
   const commitPreviewWidth = (value: string) => {
     const parsed = Number(value)
     const next = Number.isFinite(parsed) && value.trim() !== '' ? Math.round(Math.max(240, Math.min(1600, parsed)) / 10) * 10 : previewWidth
@@ -225,7 +225,7 @@ export default function VideoPreview({ panelRef, segments, time, audioAvailable,
       </div>}
       <span className="preview-resolution">{settings.width} × {settings.height}</span>
     </div>
-    <div className="video-position-controls">
+    <details className="video-settings-disclosure"><summary>Cài đặt hình ảnh và vị trí chữ</summary><div className="video-position-controls">
       <div className="position-control-heading"><div><strong>Video output</strong><span>Kích thước và nền dùng cho preview/render</span></div><button type="button" className="button button-small button-quiet" onClick={() => onSettingsChange({ width: DEFAULT_VIDEO_SETTINGS.width, height: DEFAULT_VIDEO_SETTINGS.height, backgroundColor: DEFAULT_VIDEO_SETTINGS.backgroundColor })}>Mặc định</button></div>
       <div className="preview-size-fields"><strong>Kích thước preview</strong><label><span>Rộng</span><input aria-label="Chiều rộng preview" type="number" min="240" max="1600" step="10" value={previewWidthDraft} onChange={(event) => setPreviewWidthDraft(event.target.value)} onBlur={() => commitPreviewWidth(previewWidthDraft)} onKeyDown={(event) => { if (event.key === 'Enter') { commitPreviewWidth(previewWidthDraft); event.currentTarget.blur() } }} /><small>px</small></label><input className="preview-size-slider" aria-label="Thu phóng preview" type="range" min="240" max="1200" step="10" value={Math.min(1200, previewWidth)} onChange={(event) => { const next = Number(event.target.value); setPreviewWidth(next); setPreviewWidthDraft(String(next)) }} /><label><span>Cao</span><output aria-label="Chiều cao preview">{previewHeight}</output><small>px · giữ tỉ lệ</small></label><button type="button" className="button button-small button-quiet" onClick={() => { setPreviewWidth(520); setPreviewWidthDraft('520') }}>Đặt lại</button></div>
       <label className="video-setting-field"><span>Khung hình</span><select aria-label="Độ phân giải video" value={selectedPreset ? `${selectedPreset.width}x${selectedPreset.height}` : "custom"} onChange={(event) => { const preset = RESOLUTION_PRESETS.find((item) => `${item.width}x${item.height}` === event.target.value); if (preset) onSettingsChange({ width: preset.width, height: preset.height }) }}><option value="custom">Tùy chỉnh</option>{RESOLUTION_PRESETS.map((preset) => <option key={`${preset.width}x${preset.height}`} value={`${preset.width}x${preset.height}`}>{preset.label}</option>)}</select></label>
@@ -235,6 +235,6 @@ export default function VideoPreview({ panelRef, segments, time, audioAvailable,
       <label className="position-field"><span>Ngang <small>X</small></span><div><input type="number" min="0" max="100" step="1" aria-label="Vị trí ngang phần trăm" value={xDraft} onChange={(event) => setXDraft(event.target.value)} onBlur={() => commitAxis('x', xDraft)} onKeyDown={(event) => { if (event.key === 'Enter') { commitAxis('x', xDraft); event.currentTarget.blur() } }} /><span>%</span></div></label>
       <label className="position-field"><span>Dọc <small>Y</small></span><div><input type="number" min="0" max="100" step="1" aria-label="Vị trí dọc phần trăm" value={yDraft} onChange={(event) => setYDraft(event.target.value)} onBlur={() => commitAxis('y', yDraft)} onKeyDown={(event) => { if (event.key === 'Enter') { commitAxis('y', yDraft); event.currentTarget.blur() } }} /><span>%</span></div></label>
       <p className="position-hint">Kéo chữ để di chuyển. Chọn chữ rồi dùng phím mũi tên; giữ Shift để đi nhanh.</p>
-    </div>
+    </div></details>
   </section>
 }

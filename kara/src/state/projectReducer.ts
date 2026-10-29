@@ -10,6 +10,7 @@ export type ProjectHistory = {
 export type ProjectAction =
   | { type: 'replace'; project: KaraProject }
   | { type: 'set-title'; title: string }
+  | { type: 'set-lyrics'; text: string }
   | { type: 'set-assets'; assets: MediaAsset[] }
   | { type: 'set-segments'; segments: LyricSegment[] }
   | { type: 'set-analysis-result'; segments: LyricSegment[]; snapshot?: AnalysisSnapshot }
@@ -43,6 +44,8 @@ export function projectReducer(state: ProjectHistory, action: ProjectAction): Pr
   switch (action.type) {
     case 'replace':
       return createHistory(action.project)
+    case 'set-lyrics':
+      return commit(state, { ...state.present, lyricsDraft: action.text })
     case 'set-title':
       return commit(state, { ...state.present, title: action.title })
     case 'set-assets': {

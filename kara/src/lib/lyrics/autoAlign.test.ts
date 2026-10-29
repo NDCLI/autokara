@@ -44,9 +44,9 @@ describe('alignTranscriptToLyrics', () => {
     expect(result[0].reviewReason).toBe('recognition-timing')
   })
 
-  it('keeps experimental aligned timing in review even with a high model score', () => {
+  it('keeps direct aligned timing in review even with a high model score', () => {
     const result = alignTranscriptToLyrics([{ text: 'Xin chào' }], {
-      timingMethod: 'forced-alignment',
+      timingMethod: 'direct-lyrics-alignment',
       segments: [{ id: 'aligned', text: 'Xin chào', start: 2, end: 3, words: [
         { id: 'a1', text: 'Xin', start: 2, end: 2.4, confidence: 0.98, origin: 'aligned' },
         { id: 'a2', text: 'chào', start: 2.5, end: 3, confidence: 0.98, origin: 'aligned' },

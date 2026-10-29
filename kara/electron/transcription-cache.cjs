@@ -3,7 +3,7 @@ const fs = require('node:fs/promises')
 const fsSync = require('node:fs')
 const path = require('node:path')
 
-const CACHE_VERSION = 1
+const CACHE_VERSION = 3
 
 async function sha256File(filePath) {
   const hash = crypto.createHash('sha256')
@@ -19,15 +19,13 @@ function stableProfile(profile) {
     localModelPath: profile.localModelPath,
     localPythonPath: profile.localPythonPath,
     localDevice: profile.localDevice,
-    useForcedAlignment: profile.useForcedAlignment,
-    alignmentModelPath: profile.alignmentModelPath,
     localSource: profile.localSource,
   }
 }
 
 function isTranscriptResult(value) {
   if (!value || typeof value !== 'object' || !Array.isArray(value.segments)) return false
-  if (value.timingMethod !== undefined && !['asr', 'forced-alignment'].includes(value.timingMethod)) return false
+  if (value.timingMethod !== undefined && !['asr', 'direct-lyrics-alignment'].includes(value.timingMethod)) return false
   if (value.device !== undefined && !['cpu', 'cuda'].includes(value.device)) return false
   return value.segments.every((segment) => segment && typeof segment.id === 'string' && typeof segment.text === 'string'
     && Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.start >= 0 && segment.end > segment.start

@@ -35,7 +35,7 @@ export function migrateProject(value: unknown): unknown {
       ? { ...DEFAULT_PROVIDER, ...profile, kind: 'local' }
       : profile.kind === 'mock'
         ? { ...DEFAULT_PROVIDER, ...profile, kind: 'mock' }
-        : { ...DEFAULT_PROVIDER }
+        : { ...DEFAULT_PROVIDER, kind: 'mock' }
   }
   if (Array.isArray(migrated.assets)) {
     migrated.assets = migrated.assets.map((asset) => {
@@ -61,6 +61,7 @@ export function assertProject(value: unknown): asserts value is KaraProject {
   if (!Array.isArray(project.speakers) || !project.provider || !project.exportOptions) {
     throw new Error('Project thiếu cấu hình speaker/provider/export.')
   }
+  if (project.lyricsDraft !== undefined && typeof project.lyricsDraft !== 'string') throw new Error('Lời nháp không hợp lệ.')
   for (const asset of project.assets) validateAsset(asset)
   for (const segment of project.segments) validateSegment(segment)
   for (const speaker of project.speakers) validateSpeaker(speaker)
@@ -101,7 +102,7 @@ function validateNormalizedTranscript(value: unknown): asserts value is Normaliz
   if (!value || typeof value !== 'object' || !Array.isArray((value as Partial<NormalizedTranscript>).segments)) throw new Error('Transcript lưu trong project thiếu segments.')
   const transcript = value as NormalizedTranscript
   if (transcript.duration !== undefined && (!Number.isFinite(transcript.duration) || transcript.duration < 0)) throw new Error('Duration transcript không hợp lệ.')
-  if (transcript.timingMethod !== undefined && !['asr', 'forced-alignment'].includes(transcript.timingMethod)) throw new Error('Phương thức timing transcript không hợp lệ.')
+  if (transcript.timingMethod !== undefined && !['asr', 'direct-lyrics-alignment'].includes(transcript.timingMethod)) throw new Error('Phương thức timing transcript không hợp lệ.')
   if (transcript.device !== undefined && !['cpu', 'cuda'].includes(transcript.device)) throw new Error('Thiết bị transcript không hợp lệ.')
   if (transcript.audioFingerprint !== undefined && !/^[a-f\d]{64}$/i.test(transcript.audioFingerprint)) throw new Error('Fingerprint transcript không hợp lệ.')
   if (transcript.transcriptCacheKey !== undefined && !/^[a-f\d]{64}$/i.test(transcript.transcriptCacheKey)) throw new Error('Khóa cache transcript không hợp lệ.')
@@ -206,8 +207,6 @@ function validateProvider(provider: unknown): asserts provider is ProviderProfil
     if (item.localPythonPath !== undefined && typeof item.localPythonPath !== 'string') throw new Error('Đường dẫn Python runtime không hợp lệ.')
     if (item.localSource !== undefined && !['original', 'vocal', 'auto'].includes(item.localSource)) throw new Error('Nguồn timestamp local không hợp lệ.')
     if (item.localDevice !== undefined && !['auto', 'cpu', 'cuda'].includes(item.localDevice)) throw new Error('Thiết bị local không hợp lệ.')
-    if (item.useForcedAlignment !== undefined && typeof item.useForcedAlignment !== 'boolean') throw new Error('Cấu hình forced alignment không hợp lệ.')
-    if (item.alignmentModelPath !== undefined && typeof item.alignmentModelPath !== 'string') throw new Error('Đường dẫn model căn tinh không hợp lệ.')
   }
 }
 

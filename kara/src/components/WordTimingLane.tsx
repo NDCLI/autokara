@@ -6,11 +6,12 @@ type Props = {
   segment: LyricSegment
   disabled?: boolean
   onMove: (wordId: string, delta: number) => void
+  onResize: (wordId: string, edge: 'start' | 'end', value: number) => void
 }
 
-export default function WordTimingLane({ segment, disabled = false, onMove }: Props) {
+export default function WordTimingLane({ segment, disabled = false, onMove, onResize }: Props) {
   const laneRef = useRef<HTMLDivElement>(null)
-  const dragRef = useRef<{ wordId: string; pointerId: number; startX: number; delta: number } | null>(null)
+  const dragRef = useRef<{ wordId: string; pointerId: number; startX: number; delta: number; edge?: 'start' | 'end' } | null>(null)
   const [preview, setPreview] = useState<{ wordId: string; delta: number } | null>(null)
   const duration = Math.max(0.05, segment.end - segment.start)
   const words = [...segment.words].sort((a, b) => a.start - b.start || a.end - b.end)
@@ -20,7 +21,10 @@ export default function WordTimingLane({ segment, disabled = false, onMove }: Pr
     if (disabled || !word || word.timingLocked || !laneRef.current) return
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
-    dragRef.current = { wordId, pointerId: event.pointerId, startX: event.clientX, delta: 0 }
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const offset = event.clientX - bounds.left
+    const edge = offset < 6 ? 'start' : offset > bounds.width - 6 ? 'end' : undefined
+    dragRef.current = { edge, wordId, pointerId: event.pointerId, startX: event.clientX, delta: 0 }
   }
 
   function move(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -38,7 +42,11 @@ export default function WordTimingLane({ segment, disabled = false, onMove }: Pr
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
     dragRef.current = null
     setPreview(null)
-    if (Math.abs(drag.delta) > 0.005) onMove(drag.wordId, drag.delta)
+    if (Math.abs(drag.delta) > 0.005) {
+      const word = words.find(item => item.id === drag.wordId)
+      if (drag.edge && word) onResize(drag.wordId, drag.edge, word[drag.edge] + drag.delta)
+      else onMove(drag.wordId, drag.delta)
+    }
   }
 
   return <div className="word-timing-lane" ref={laneRef} aria-label="Timeline timing từng từ">
@@ -51,13 +59,13 @@ export default function WordTimingLane({ segment, disabled = false, onMove }: Pr
         key={word.id}
         className={`word-lane-block ${word.timingLocked ? 'is-locked' : ''}`}
         style={{ left: `calc(${left}% + ${delta / duration * 100}%)`, width: `${width}%` }}
-        title={`${word.text} · ${word.start.toFixed(2)}–${word.end.toFixed(2)}s${word.timingLocked ? ' · đã khóa' : ' · kéo để dịch timing'}`}
-        aria-label={`${word.text}, ${word.start.toFixed(2)} đến ${word.end.toFixed(2)} giây${word.timingLocked ? ', đã khóa' : ', kéo để dịch timing'}`}
+        title={`${word.text} · ${word.start.toFixed(2)}–${word.end.toFixed(2)}s${word.timingLocked ? ' · đã khóa' : ' · kéo giữa để dịch, kéo mép để căn đầu/cuối'}`}
+        aria-label={`${word.text}, ${word.start.toFixed(2)} đến ${word.end.toFixed(2)} giây${word.timingLocked ? ', đã khóa' : ', kéo giữa để dịch, kéo mép để căn đầu/cuối'}`}
         disabled={disabled || word.timingLocked}
         onPointerDown={(event) => start(event, word.id)}
         onPointerMove={move}
         onPointerUp={finish}
-        onPointerCancel={finish}
+        onPointerCancel={() => { dragRef.current = null; setPreview(null) }}
       ><span>{word.text}</span></button>
     })}
     {Array.from({ length: 3 }, (_, index) => <i key={index} className="word-lane-grid" style={{ left: `${(index + 1) * 25}%` }} />)}

@@ -20,6 +20,20 @@ except (AttributeError, OSError):
     pass
 
 
+_DLL_HANDLES = []
+
+def prepare_cuda_libraries():
+    # Same lazy-DLL preparation used by Vietkara; retain Windows directory handles.
+    spec = importlib.util.find_spec('torch')
+    if not spec or not spec.origin:
+        return
+    directory = Path(spec.origin).parent / 'lib'
+    if directory.is_dir():
+        os.environ['PATH'] = str(directory) + os.pathsep + os.environ.get('PATH', '')
+        if os.name == 'nt' and hasattr(os, 'add_dll_directory'):
+            _DLL_HANDLES.append(os.add_dll_directory(str(directory)))
+
+
 def supported_python_version(version_info, manifest_path=None):
     path = Path(manifest_path) if manifest_path else Path(__file__).with_name("local-runtime-manifest.json")
     manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -65,24 +79,128 @@ def enclose_segment_words(start, end, words):
     return min(start, ordered[0]["start"]), max(end, ordered[-1]["end"])
 
 
-def aligned_words_are_usable(original, words, expected_word_count):
-    """Reject collapsed/low-evidence alignment instead of replacing usable ASR timing."""
-    if not words or len(words) < max(1, math.ceil(expected_word_count * 0.75)):
-        return False
-    scores = [word.get("score") for word in words]
-    if any(not isinstance(score, (int, float)) or not math.isfinite(score) for score in scores):
-        return False
-    if sum(scores) / len(scores) < 0.08:
-        return False
-    for word in words:
-        start, end = word.get("start"), word.get("end")
-        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
-            return False
-        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
-            return False
-        if start < original["start"] - 0.5 or end > original["end"] + 0.5:
-            return False
-    return True
+def repair_prefix(model, samples, words, offset, language):
+    """Repair collapsed early tokens only when a local ASR phrase agrees with the supplied lyrics."""
+    import difflib
+    import re
+    import unicodedata
+    prefix=words[:40]
+    if not any(w['end']-w['start']<.05 for w in prefix):return 0
+    segments,_=model.transcribe_original(samples[:16000*30],language=language or 'vi',
+                                         word_timestamps=True,beam_size=5,vad_filter=False,
+                                         condition_on_previous_text=False,temperature=0.)
+    heard=[]
+    for segment in segments:
+        for item in segment.words or []:
+            tokens=item.word.split()
+            for j,token in enumerate(tokens):
+                heard.append({'text':token,'start':offset+item.start+(item.end-item.start)*j/max(1,len(tokens)),
+                              'end':offset+item.start+(item.end-item.start)*(j+1)/max(1,len(tokens))})
+    def key(text):return re.sub(r'[^\w]','',unicodedata.normalize('NFC',text).casefold())
+    matcher=difflib.SequenceMatcher(None,[key(w['text']) for w in prefix],[key(w['text']) for w in heard],autojunk=False)
+    repaired=0
+    for block in matcher.get_matching_blocks():
+        if block.size<3:continue
+        for j in range(block.size):
+            i=block.a+j;word=words[i];anchor=heard[block.b+j]
+            if word['end']-word['start']>=.05 or abs(anchor['start']-word['start'])>2:continue
+            start=max(offset,anchor['start'],words[i-1]['end'] if i else offset)
+            end=min(anchor['end'],words[i+1]['start'] if i+1<len(words) else anchor['end'])
+            if end-start>=.08:
+                word.update(start=float(start),end=float(end),estimated=True)
+                repaired+=1
+    return repaired
+
+def align_supplied_lyrics(args):
+    emit({'type': 'progress', 'phase': 'loading-model', 'percent': 3, 'status': 'Đang chuẩn bị engine căn lời Stable-ts…'})
+    import contextlib
+    import unicodedata
+    import numpy as np
+    from faster_whisper.audio import decode_audio
+    try:
+        import stable_whisper
+    except ImportError as error:
+        raise RuntimeError("Căn lời như Vietkara cần stable-ts. Cài stable-ts trong Python runtime đang chọn.") from error
+    lyrics = Path(args.lyrics_file).read_text(encoding="utf-8-sig").strip()
+    lines = [line.split() for line in lyrics.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("File lời trống.")
+    samples = decode_audio(args.audio, sampling_rate=16000)
+    duration = len(samples) / 16000
+    # Trim sustained near-silence, never speech VAD on singing.
+    frame = 320
+    count = len(samples) // frame
+    first, last = 0, len(samples)
+    if count >= 5:
+        rms = np.sqrt(np.mean(samples[:count*frame].reshape(count, frame).astype(np.float64)**2, axis=1))
+        high, low = float(np.percentile(rms, 95)), float(np.percentile(rms, 10))
+        if high >= 1e-5 and high >= low * 5:
+            active = np.convolve((rms > max(1e-5, high*.025)).astype(int), np.ones(5, dtype=int), 'same') >= 4
+            indices = np.flatnonzero(active)
+            if len(indices):
+                first = max(0, int(indices[0]*frame - 8000))
+                last = min(len(samples), int((indices[-1]+1)*frame + 11200))
+    offset = first / 16000
+    device = 'cpu' if args.device == 'cpu' else 'cuda'
+    fallback = None
+    loaded_model = None
+    def run(device):
+        nonlocal loaded_model
+        emit({"type": "progress", "phase": "aligning", "status": "Đang căn trực tiếp lời vào audio · " + device, "percent": 15})
+        with contextlib.redirect_stdout(sys.stderr):
+            model = stable_whisper.load_faster_whisper(args.model, device=device, compute_type='int8' if device == 'cpu' else 'float16')
+            loaded_model = model
+            return model.align(samples[first:last], unicodedata.normalize('NFC', lyrics).lower(), language=args.language if args.language not in ('', 'auto') else 'vi', original_split=True, vad=False, verbose=False).to_dict()
+    try:
+        result = run(device)
+    except Exception as error:
+        if args.device != 'auto' or device == 'cpu':
+            raise
+        fallback, device = str(error), 'cpu'
+        result = run(device)
+    segments = result.get('segments', [])
+    if len(segments) != len(lines):
+        raise RuntimeError('Model không căn đủ dòng lời. Hãy kiểm tra lời hoặc căn đoạn ngắn hơn.')
+    output, all_words = [], []
+    for index, (tokens, segment) in enumerate(zip(lines, segments)):
+        spans = []
+        for item in segment.get('words', []):
+            parts = item.get('word', '').split()
+            a, b = float(item['start']), float(item['end'])
+            for k in range(len(parts)):
+                spans.append((a+(b-a)*k/len(parts), a+(b-a)*(k+1)/len(parts)))
+        if len(spans) != len(tokens):
+            raise RuntimeError(f'Dòng {index+1}: số từ căn được không khớp lời. Kết quả cũ được giữ nguyên.')
+        words = []
+        for k, (token, (a, b)) in enumerate(zip(tokens, spans)):
+            a, b = a+offset, b+offset
+            if not math.isfinite(a) or not math.isfinite(b) or a < 0 or b < a or b > duration+.05:
+                raise RuntimeError(f'Dòng {index+1}: timestamp không hợp lệ. Hãy căn đoạn ngắn hơn.')
+            words.append({'id': f'aligned-{index+1}-{k+1}', 'text': token, 'start': a, 'end': min(duration, max(a+.03, b)), 'origin': 'estimated' if b-a < .05 else 'aligned'})
+        all_words.extend(words)
+        output.append({'id': f'segment-{index+1}', 'text': ' '.join(tokens), 'start': words[0]['start'], 'end': words[-1]['end'], 'words': words})
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            repair_prefix(loaded_model, samples[first:last], all_words, offset, args.language)
+    except Exception as error:
+        emit({'type': 'progress', 'phase': 'aligning', 'percent': 94, 'status': 'Giữ kết quả căn chính: ' + str(error)[:120]})
+    for i, word in enumerate(all_words):
+        if word.pop('estimated', False):
+            word['origin'] = 'estimated'
+        if i and word['start'] < all_words[i-1]['end']:
+            all_words[i-1]['end'] = max(all_words[i-1]['start']+.001, word['start'])
+            all_words[i-1]['origin'] = 'estimated'
+        if word['end'] <= word['start']:
+            raise RuntimeError('Không đủ thời gian để căn từ. Hãy chọn đoạn ngắn hơn.')
+    for segment in output:
+        segment['start'] = segment['words'][0]['start']
+        segment['end'] = max(w['end'] for w in segment['words'])
+    short = sum(w['end']-w['start'] < .05 for w in all_words)
+    prefix = all_words[:40]
+    if len(all_words) >= 12 and (short/len(all_words) > .35 or sum(w['end']-w['start'] < .05 for w in prefix)/len(prefix) > .6):
+        raise RuntimeError('Căn lời chưa tin cậy: quá nhiều từ bị dồn mốc. Kết quả cũ được giữ nguyên.')
+    emit({'type': 'result', 'segments': output, 'duration': duration, 'timingMethod': 'direct-lyrics-alignment', 'device': device, 'deviceFallbackReason': fallback})
+    return 0
 
 
 def main():
@@ -92,8 +210,7 @@ def main():
     parser.add_argument("--language", default="vi")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--prompt", default="")
-    parser.add_argument("--forced-align", action="store_true")
-    parser.add_argument("--align-model", default="")
+    parser.add_argument("--lyrics-file", default="")
     parser.add_argument("--health-check", action="store_true")
     args = parser.parse_args()
 
@@ -130,7 +247,6 @@ def main():
         faster_whisper = package_info("faster_whisper", "faster-whisper")
         pyav = package_info("av", "av")
         ctranslate2 = package_info("ctranslate2", "ctranslate2")
-        whisperx = package_info("whisperx", "whisperx")
         demucs = package_info("demucs", "demucs", verify_import=True)
         emit({
             "type": "result",
@@ -141,7 +257,7 @@ def main():
             "fasterWhisper": faster_whisper,
             "av": pyav,
             "ctranslate2": ctranslate2,
-            "whisperx": whisperx,
+            "stableWhisper": package_info("stable_whisper", "stable-ts", verify_import=True),
             "demucs": demucs,
             "runtimeReady": python_supported and faster_whisper["available"] and pyav["available"] and ctranslate2["available"],
             "cudaDeviceCount": cuda_device_count,
@@ -162,6 +278,7 @@ def main():
         return 2
 
     try:
+        prepare_cuda_libraries()
         prepare_faster_whisper_audio_compatibility()
         from faster_whisper import WhisperModel
     except ImportError as error:
@@ -169,6 +286,8 @@ def main():
         return 2
 
     try:
+        if args.lyrics_file:
+            return align_supplied_lyrics(args)
         device = args.device
         if device == "auto":
             device = "cuda"
@@ -243,76 +362,7 @@ def main():
             emit({"type": "progress", "phase": "transcribing", "status": "GPU không sẵn sàng; đang tiếp tục trên CPU…", "percent": 10})
             output, info = transcribe_loaded_model(model)
         duration = getattr(info, "duration", None)
-        timing_method = "asr"
-        if args.forced_align:
-            try:
-                import whisperx
-            except ImportError as error:
-                emit({"type": "error", "code": "alignment-runtime-missing", "message": "Chưa cài WhisperX. Chạy `python -m pip install whisperx` trong Python runtime của Kara Studio rồi thử lại."})
-                return 2
-            if not output:
-                emit({"type": "error", "code": "alignment-empty-transcript", "message": "ASR không tạo được nội dung để căn tinh."})
-                return 1
-            language = args.language if args.language not in ("", "auto") else getattr(info, "language", "")
-            if not language:
-                emit({"type": "error", "code": "alignment-language-unknown", "message": "WhisperX cần biết ngôn ngữ để chọn model căn tinh."})
-                return 1
-            emit({"type": "progress", "phase": "loading-aligner", "status": f"Đang nạp model căn tinh WhisperX ({language})…", "percent": 96})
-            model_options = {"language_code": language, "device": device}
-            if args.align_model.strip():
-                model_options["model_name"] = args.align_model.strip()
-            import gc
-            del model
-            gc.collect()
-            if device == "cuda":
-                try:
-                    import torch
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-            try:
-                align_model, metadata = whisperx.load_align_model(**model_options)
-            except Exception as error:
-                if device != "cuda":
-                    raise
-                device_fallback_reason = (device_fallback_reason + " · " if device_fallback_reason else "") + f"WhisperX chuyển sang CPU: {error}"
-                device = "cpu"
-                model_options["device"] = device
-                align_model, metadata = whisperx.load_align_model(**model_options)
-            emit({"type": "progress", "phase": "forced-alignment", "status": "Đang căn chi tiết timestamp trên audio…", "percent": 98})
-            audio = whisperx.load_audio(args.audio)
-            source_segments = [{"start": segment["start"], "end": segment["end"], "text": segment["text"]} for segment in output]
-            aligned_result = whisperx.align(source_segments, align_model, metadata, audio, device, return_char_alignments=False)
-            aligned_segments = aligned_result.get("segments", [])
-            refined = []
-            for index, original in enumerate(output):
-                aligned_segment = aligned_segments[index] if index < len(aligned_segments) else {}
-                aligned_words = []
-                for word_index, word in enumerate(aligned_segment.get("words", [])):
-                    start = word.get("start")
-                    end = word.get("end")
-                    text = str(word.get("word", "")).strip()
-                    if not text or not isinstance(start, (int, float)) or not isinstance(end, (int, float)) or not math.isfinite(start) or not math.isfinite(end) or end <= start:
-                        continue
-                    aligned_words.append({
-                        "id": f"aligned-{index + 1}-{word_index + 1}",
-                        "text": text,
-                        "start": max(0.0, float(start)),
-                        "end": max(float(start) + 0.01, float(end)),
-                        "confidence": max(0.0, min(1.0, float(word.get("score", 0.8)))),
-                        "origin": "aligned",
-                    })
-                expected_words = len(original.get("words", []))
-                enough_words = aligned_words_are_usable(original, aligned_words, expected_words)
-                refined.append({
-                    **original,
-                    "start": aligned_words[0]["start"] if enough_words else original["start"],
-                    "end": aligned_words[-1]["end"] if enough_words else original["end"],
-                    "words": aligned_words if enough_words else original.get("words", []),
-                })
-            output = refined
-            timing_method = "forced-alignment"
-        emit({"type": "result", "duration": duration, "segments": output, "source": "audio", "timingMethod": timing_method, "device": device, "deviceFallbackReason": device_fallback_reason})
+        emit({"type": "result", "duration": duration, "segments": output, "source": "audio", "timingMethod": "asr", "device": device, "deviceFallbackReason": device_fallback_reason})
         return 0
     except Exception as error:
         emit({"type": "error", "code": "transcription-failed", "message": str(error) or "Faster-Whisper không tạo được timestamp."})

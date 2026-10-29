@@ -6,7 +6,6 @@ __pycache__/
 *.pyc
 .venv-engine-audit/
 
-runtime/repro-check/
-runtime/repro-check-song-45s.wav
-runtime/qwen-probe/
-runtime/qwen-cache/
+runtime/*/
+runtime/*.wav
+!runtime/windows-python312-cpu-requirements.lock.txt

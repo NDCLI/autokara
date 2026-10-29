@@ -4,7 +4,7 @@ import { DEFAULT_EXPORT_OPTIONS, DEFAULT_PROVIDER, DEFAULT_VIDEO_SETTINGS, SPEAK
 import { parseProjectJson } from '../shared/validation'
 import { lyricsToSegments, parseLyrics } from './lib/lyrics/parse'
 import { alignTranscriptToLyrics } from './lib/lyrics/autoAlign'
-import { moveWord, resizeSegment } from './engine/timeline'
+import { moveWord, resizeSegment, resizeWord } from './engine/timeline'
 import { preserveLockedTimings } from './engine/preserveLockedTimings'
 import { realignSegmentFromTranscript } from './engine/realignSegment'
 import { captureRecognitionSnapshot, isRecognitionSnapshotCurrent } from './engine/recognitionSnapshot'
@@ -39,7 +39,7 @@ function finiteMediaDuration(value: number): number | undefined {
 }
 
 function createProject(): KaraProject {
-  return createNewProject({ provider: DEFAULT_PROVIDER, exportOptions: DEFAULT_EXPORT_OPTIONS })
+  return { ...createNewProject({ provider: DEFAULT_PROVIDER, exportOptions: DEFAULT_EXPORT_OPTIONS }), segments: [] }
 }
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
@@ -113,7 +113,7 @@ function App() {
   const [recoveryBusy, setRecoveryBusy] = useState(false)
   const [currentPath, setCurrentPath] = useState<string | undefined>()
   const [activeKind, setActiveKind] = useState<'full' | 'beat' | 'vocal'>('full')
-  const [inspectorOpen, setInspectorOpen] = useState(true)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
   const [workspaceWidths, setWorkspaceWidths] = useState<WorkspaceWidths>(readWorkspaceWidths)
   const [workflowStep, setWorkflowStep] = useState<'ingest' | 'recognize' | 'sync' | 'preview' | 'export'>('ingest')
   const sourceRailRef = useRef<HTMLElement | null>(null)
@@ -151,7 +151,8 @@ function App() {
   const [exportFormat, setExportFormat] = useState<ExportFormat>('ass')
   const [exportPreview, setExportPreview] = useState('')
   const [drag, setDrag] = useState<DragState | null>(null)
-  const [lyricsRaw, setLyricsRaw] = useState('')
+  const lyricsRaw = project.lyricsDraft ?? ''
+  const setLyricsRaw = (text: string) => dispatch({ type: 'set-lyrics', text })
   const providerProfileRef = useRef(providerProfile)
   providerProfileRef.current = providerProfile
   const lyricsRawRef = useRef(lyricsRaw)
@@ -702,7 +703,7 @@ function App() {
       if (lyrics && window.kara) {
         try { setLyricsRaw(await window.kara.readTextFile(lyrics.path)) }
         catch { setLyricsRaw(''); notify('Đã khôi phục project; cần nối lại file lời.') }
-      } else setLyricsRaw('')
+      }
       setBackgroundUrl(restored.assets.find((asset) => asset.kind === 'background')?.url)
       const mappedPlayback = restored.assets.find((asset) => asset.id === restored.trackTimeMapping.playbackAssetId)
       const playable = mappedPlayback && ['full', 'beat', 'vocal'].includes(mappedPlayback.kind)
@@ -822,14 +823,6 @@ function App() {
   }
 
   function navigateWorkflowStep(step: 'ingest' | 'recognize' | 'sync' | 'preview' | 'export') {
-    if ((step === 'preview' || step === 'export') && reviewCount > 0) {
-      setReviewQueueOpen(true)
-      setWorkflowStep('sync')
-      const first = sortedSegments.find((segment) => segment.needsReview)
-      if (first) jumpToReview(first)
-      notify(`${reviewCount} dòng còn cần nghe xác nhận trước khi preview hoặc xuất.`)
-      return
-    }
     setWorkflowStep(step)
     if (step === 'export') {
       updateExportPreview()
@@ -1089,15 +1082,15 @@ function App() {
         `Faster-Whisper ${report.fasterWhisper.version ?? (report.fasterWhisper.available ? 'đã cài' : 'chưa cài')}`,
         `PyAV ${report.av?.version ?? (report.av?.available ? 'đã cài' : 'chưa cài')}`,
         `CTranslate2 ${report.ctranslate2?.version ?? (report.ctranslate2?.available ? 'đã cài' : 'chưa cài')}`,
-        `WhisperX ${report.whisperx.version ?? (report.whisperx.available ? 'đã cài' : 'chưa cài')}`,
+        `Stable-ts ${report.stableWhisper?.version ?? (report.stableWhisper?.available ? 'đã cài' : report.stableWhisper?.error ? 'thiếu dependency' : 'chưa cài')}`,
         `Demucs ${report.demucs?.available ? report.demucs.version ?? 'sẵn sàng' : report.demucs?.error ? `thiếu dependency (${report.demucs.error})` : 'chưa cài'}`,
         `CUDA ${report.cudaDeviceCount ? `sẵn sàng · ${report.cudaDeviceCount} thiết bị` : 'không khả dụng'}`,
       ]
-      const alignmentReady = !providerProfile.useForcedAlignment || report.whisperx.available
+      const alignmentReady = Boolean(report.stableWhisper?.available)
       const supported = report.manifest?.runtime?.python?.supported?.join('/') ?? '3.10/3.11/3.12'
       const pythonReady = report.pythonSupported ?? true
       const asrReady = report.runtimeReady ?? report.fasterWhisper.available
-      const status = !pythonReady ? `Python ngoài dải hỗ trợ (${supported})` : !asrReady ? 'Thiếu Faster-Whisper hoặc runtime chưa sẵn sàng' : !alignmentReady ? 'Thiếu WhisperX cho căn tinh' : 'Runtime sẵn sàng'
+      const status = !pythonReady ? `Python ngoài dải hỗ trợ (${supported})` : !asrReady ? 'Thiếu Faster-Whisper hoặc runtime chưa sẵn sàng' : !alignmentReady ? `Thiếu Stable-ts${report.stableWhisper?.error ? `: ${report.stableWhisper.error}` : ''}` : 'Runtime sẵn sàng'
       const policy = report.manifest?.runtime?.packages?.['faster-whisper']?.versionPolicy === 'unverified' ? ' · phiên bản package chưa pin/xác minh' : ''
       const manifestStatus = report.manifestLoaded === false ? ' · thiếu runtime manifest' : ''
       setRuntimeCheck({ busy: false, ok: pythonReady && asrReady && alignmentReady && report.manifestLoaded !== false, message: `${status} · ${report.pythonExecutable ?? 'Python'} ${report.pythonVersion} · ${packages.join(' · ')}${policy}${manifestStatus}` })
@@ -1115,7 +1108,7 @@ function App() {
     try {
       setRecognitionProgress(0)
       let transcript: NormalizedTranscript
-      const lyricsText = lyricsRaw || project.segments.map((segment) => segment.text).join('\n')
+      const lyricsText = lyricsRaw ? parseLyrics(lyricsRaw, lyricsAsset?.displayName).map((line) => line.text).join('\n') : project.segments.map((segment) => segment.text).join('\n')
       if (providerProfile.kind === 'mock') {
         const mockLines = lyricsRaw ? parseLyrics(lyricsRaw, lyricsAsset?.displayName) : project.segments.map((segment) => ({ text: segment.text, start: segment.start, end: segment.end }))
         const words = mockLines.flatMap((line, index) => {
@@ -1139,17 +1132,17 @@ function App() {
         return
       }
       const lines = lyricsRaw ? parseLyrics(lyricsRaw, lyricsAsset?.displayName) : []
-      const alignedSegments = lines.length
+      const alignedSegments = lines.length && transcript.timingMethod !== 'direct-lyrics-alignment'
         ? alignTranscriptToLyrics(lines, transcript)
         : transcript.segments.map((segment) => ({
           ...segment,
-          words: segment.words.map((word) => ({ ...word, origin: providerProfile.kind === 'mock' || word.origin === 'estimated' ? 'estimated' as const : transcript.timingMethod === 'forced-alignment' && word.origin === 'aligned' ? 'aligned' as const : 'asr' as const })),
+          words: segment.words.map((word) => ({ ...word, origin: providerProfile.kind === 'mock' || word.origin === 'estimated' ? 'estimated' as const : transcript.timingMethod === 'direct-lyrics-alignment' && word.origin === 'aligned' ? 'aligned' as const : 'asr' as const })),
           speakerRole: 'unknown' as const,
           providerSpeakerId: segment.speakerId,
           needsReview: providerProfile.kind === 'mock' || segment.words.length === 0 || segment.words.some((word) => word.origin !== 'manual') || (segment.confidence ?? 1) < 0.68,
           reviewReason: segment.words.length === 0 ? 'empty-timing' as const : providerProfile.kind === 'mock' || segment.words.some((word) => word.origin === 'estimated') ? 'estimated-timing' as const : segment.words.some((word) => word.origin === 'asr' || word.origin === 'aligned') ? 'recognition-timing' as const : (segment.confidence ?? 1) < 0.68 ? 'low-text-match' as const : undefined,
           reviewStatus: providerProfile.kind === 'mock' ? 'pending' as const : undefined,
-          origin: providerProfile.kind === 'mock' ? 'estimated' as const : transcript.timingMethod === 'forced-alignment' && segment.words.length && segment.words.every((word) => word.origin === 'aligned') ? 'aligned' as const : 'asr' as const,
+          origin: providerProfile.kind === 'mock' ? 'estimated' as const : transcript.timingMethod === 'direct-lyrics-alignment' && segment.words.length && segment.words.every((word) => word.origin === 'aligned') ? 'aligned' as const : 'asr' as const,
         }))
       const nextSegments = preserveLockedTimings(project.segments, alignedSegments)
       const transcriptSnapshot = providerProfile.kind === 'mock' || (transcript.audioFingerprint && transcript.audioSignature) ? {
@@ -1170,7 +1163,7 @@ function App() {
       dispatch({ type: 'set-analysis-result', segments: nextSegments, snapshot: transcriptSnapshot })
       setSelectedId(nextSegments[0]?.id ?? '')
       setWorkflowStep('sync')
-      const engineDetail = transcript.timingMethod === 'forced-alignment' ? ' · WhisperX forced alignment thử nghiệm' : ''
+      const engineDetail = transcript.timingMethod === 'direct-lyrics-alignment' ? ' · Căn trực tiếp lời theo audio' : ''
       const deviceDetail = transcript.deviceFallbackReason ? ` · đã chuyển sang CPU: ${transcript.deviceFallbackReason}` : ''
       const needsReviewCount = nextSegments.filter((segment) => segment.needsReview).length
       notify(`${nextSegments.length} dòng đã sẵn sàng · ${needsReviewCount} dòng cần nghe xác nhận${engineDetail}${deviceDetail}${transcript.cacheHit ? ' · dùng kết quả đã lưu cache' : ''}.`)
@@ -1223,15 +1216,6 @@ function App() {
 
   async function startRender() {
     if (renderState.status === 'running' || renderState.status === 'canceling') return
-    if (reviewCount > 0) {
-      setModal(null)
-      setWorkflowStep('sync')
-      setReviewQueueOpen(true)
-      const first = sortedSegments.find((segment) => segment.needsReview)
-      if (first) jumpToReview(first)
-      notify(`${reviewCount} dòng còn cần nghe xác nhận trước khi render.`)
-      return
-    }
     if (!window.kara) {
       setModal('render')
       setRenderState({ jobId: '', status: 'error', percent: 0, message: '', error: 'Render MP4 chỉ khả dụng trong ứng dụng desktop.' })
@@ -1491,7 +1475,7 @@ function App() {
           <span className="topbar-divider" />
           <button className="button button-quiet" onClick={() => { void importProviderSettings(); setModal('provider') }}><Icon name="settings" size={16} /><span>Nhận dạng</span></button>
           <button className="button button-quiet" onClick={() => void saveProject()}><Icon name="save" size={16} /><span>Lưu</span></button>
-              <button className="button button-quiet render-launch" onClick={() => { if (reviewCount) { navigateWorkflowStep('preview'); return } setWorkflowStep('preview'); setModal('render') }} disabled={renderState.status === 'running' || renderState.status === 'canceling'} title={reviewCount ? `${reviewCount} dòng cần nghe xác nhận` : 'Render video'}><Icon name="video" size={16} /><span>{reviewCount ? `Rà ${reviewCount} dòng` : 'Render video'}</span></button>
+              <button className="button button-quiet render-launch" onClick={() => { setWorkflowStep('preview'); setModal('render') }} disabled={renderState.status === 'running' || renderState.status === 'canceling'} title="Render video từ timing hiện tại"><Icon name="video" size={16} /><span>Render video</span></button>
           <button className="button button-accent" onClick={() => navigateWorkflowStep('export')}><Icon name="export" size={16} /><span>Xuất lời</span></button>
         </div>
       </header>
@@ -1548,7 +1532,31 @@ function App() {
           {recoveryCandidate && <div className="recovery-banner" role="status"><div><strong>Có bản tự khôi phục chưa được mở</strong><span>{recoveryCandidate.title} · cập nhật {new Date(recoveryCandidate.updatedAt).toLocaleString('vi-VN')}</span></div><button className="button button-small button-accent" onClick={() => void restoreRecoveryProject()} disabled={recoveryBusy}>{recoveryBusy ? 'Đang mở…' : 'Khôi phục'}</button><button className="button button-small button-quiet" onClick={() => void dismissRecoveryProject()} disabled={recoveryBusy}>Bỏ qua</button></div>}
           <div className="workflow-strip" aria-label="Quy trình karaoke"><button className={`workflow-step ${workflowStep === 'ingest' ? 'is-active' : 'is-done'}`} onClick={() => navigateWorkflowStep('ingest')}><span>01</span><strong>Nạp bài</strong><small>{fullAsset || backgroundAsset ? 'Media đã sẵn sàng' : 'Audio hoặc video'}</small></button><button className={`workflow-step ${workflowStep === 'recognize' ? 'is-active' : recentTranscriptMatches ? 'is-done' : ''}`} onClick={() => navigateWorkflowStep('recognize')}><span>02</span><strong>Nhận dạng</strong><small>{providerProfile.kind === 'local' ? 'Whisper local' : 'Demo offline'}</small></button><button className={`workflow-step ${workflowStep === 'sync' ? 'is-active' : project.segments.length ? 'is-done' : ''}`} onClick={() => navigateWorkflowStep('sync')}><span>03</span><strong>Đồng bộ</strong><small>{completedCount}/{project.segments.length || 0} dòng</small></button><button className={`workflow-step ${workflowStep === 'preview' ? 'is-active' : ''}`} onClick={() => navigateWorkflowStep('preview')}><span>04</span><strong>Preview</strong><small>Style &amp; vị trí</small></button><button className={`workflow-step ${workflowStep === 'export' ? 'is-active' : ''}`} onClick={() => navigateWorkflowStep('export')}><span>05</span><strong>Xuất</strong><small>ASS · MP4</small></button></div>
           <div className="guided-next-step"><div className="guided-step-marker"><span>TIẾP THEO</span><b>{nextReviewSegment ? project.segments.filter((segment) => segment.needsReview).length : project.segments.length ? '✓' : '01'}</b></div><div className="guided-step-copy"><strong>{guidedStep.title}</strong><span>{guidedStep.detail}</span></div><div className="guided-step-actions"><button className="button button-accent button-small" onClick={guidedStep.run} disabled={busy || Boolean(separationJobId)}>{busy ? 'Đang xử lý…' : guidedStep.label}</button>{guidedStep.secondaryLabel && <button className="button button-quiet button-small" onClick={guidedStep.secondary}>{guidedStep.secondaryLabel}</button>}</div></div>
-            <section className="transport-panel">
+  <div className="studio-top"><section className="lyrics-input-panel">          <label className="lyrics-editor-label" htmlFor="lyrics-draft">Lời chuẩn · mỗi câu một dòng</label>
+          <textarea id="lyrics-draft" className="lyrics-draft" value={lyricsRaw} onChange={(event) => setLyricsRaw(event.target.value)} placeholder="Dán lời đúng bản ca sĩ vào đây. Để trống nếu cần nhận dạng lời." spellCheck={false} />
+          <button className="button button-accent" disabled={busy} onClick={() => void transcribe()}>{busy ? `Đang xử lý ${Math.round(recognitionProgress)}%` : lyricsRaw.trim() ? 'Căn lời theo nhạc' : 'Nhận lời từ nhạc'}</button>
+</section>            <VideoPreview
+            panelRef={previewSectionRef}
+            key={project.projectId}
+            segments={sortedSegments}
+            time={position}
+            audioAvailable={Boolean(activeAsset?.url || previewBackgroundUrl)}
+            settings={videoSettings}
+            backgroundUrl={previewBackgroundUrl}
+            playing={playing}
+            onPositionChange={setLyricPosition}
+            onSettingsChange={(settings) => dispatch({ type: 'set-video-settings', settings })}
+            onBackgroundError={(message) => void prepareCompatibleVideoPreview(message)}
+            includeSpeakerPrefix={project.exportOptions.includeSpeakerPrefix}
+            includeKaraokeTags={project.exportOptions.includeKaraokeTags}
+            leadInMs={project.exportOptions.leadInMs}
+            leadOutMs={project.exportOptions.leadOutMs}
+            onBackgroundDurationChange={(value) => {
+              if (backgroundAsset) setAssetDurations((current) => ({ ...current, [backgroundAsset.id]: value }))
+              if (!activeAsset && value > 0) setDuration(value)
+            }}
+          /></div>
+          <section className="transport-panel">
               <div className="transport-topline">
 
               <div className="transport-current">
@@ -1589,27 +1597,7 @@ function App() {
             }} />}
           </section>
 
-            <VideoPreview
-            panelRef={previewSectionRef}
-            key={project.projectId}
-            segments={sortedSegments}
-            time={position}
-            audioAvailable={Boolean(activeAsset?.url || previewBackgroundUrl)}
-            settings={videoSettings}
-            backgroundUrl={previewBackgroundUrl}
-            playing={playing}
-            onPositionChange={setLyricPosition}
-            onSettingsChange={(settings) => dispatch({ type: 'set-video-settings', settings })}
-            onBackgroundError={(message) => void prepareCompatibleVideoPreview(message)}
-            includeSpeakerPrefix={project.exportOptions.includeSpeakerPrefix}
-            includeKaraokeTags={project.exportOptions.includeKaraokeTags}
-            leadInMs={project.exportOptions.leadInMs}
-            leadOutMs={project.exportOptions.leadOutMs}
-            onBackgroundDurationChange={(value) => {
-              if (backgroundAsset) setAssetDurations((current) => ({ ...current, [backgroundAsset.id]: value }))
-              if (!activeAsset && value > 0) setDuration(value)
-            }}
-          />
+
 
           <div className="timeline-heading" ref={syncSectionRef}>
             <div><div className="section-title">Lời & thời gian</div><p>Kéo mép dòng để căn nhịp · chọn một dòng để sửa</p></div>
@@ -1627,7 +1615,7 @@ function App() {
           <div className="timeline-column-labels"><span>LỜI</span><div ref={rulerRef} className="ruler-header"><span>00:00</span><span>{formatClock(maxTime * 0.25)}</span><span>{formatClock(maxTime * 0.5)}</span><span>{formatClock(maxTime * 0.75)}</span><span>{formatClock(maxTime)}</span></div><span>NGƯỜI HÁT</span></div>
           <div className="segment-list">
             {sortedSegments.map((segment, index) => (
-              <div className={`segment-row ${selected?.id === segment.id ? 'is-selected' : ''}`} key={segment.id} onClick={() => { setSelectedId(segment.id); seekTo(segment.start) }}>
+              <div className={`segment-row ${selected?.id === segment.id ? 'is-selected' : ''}`} key={segment.id} onClick={() => { setSelectedId(segment.id); setInspectorOpen(true) }}>
                 <div className="segment-lyric-cell">
                   <span className="segment-index">{String(index + 1).padStart(2, '0')}</span>
                   <span className="segment-copy"><strong>{segment.text}</strong><small>{formatClock(drag?.id === segment.id ? drag.previewStart ?? segment.start : segment.start)} <span>–</span> {formatClock(drag?.id === segment.id ? drag.previewEnd ?? segment.end : segment.end)}</small></span>
@@ -1699,11 +1687,11 @@ function App() {
               </div>
               <p className="word-recording-hint">Căn nhanh: bấm ▶ rồi giữ <kbd>Space</kbd> trong lúc phát âm từ, nhả phím để chốt thời điểm; mỗi nhịp là một từ. Có thể chạm từng từ để sửa thủ công.</p>
               {selected.words.length ? <>
-                <WordTimingLane segment={selected} disabled={Boolean(wordRecording || selected.timingLocked)} onMove={(wordId, delta) => {
+                <WordTimingLane onResize={(id, edge, time) => { const next = resizeWord(selected, id, edge, time); if (next !== selected) dispatch({ type: 'update-segment', id: selected.id, patch: { words: next.words, origin: 'manual', ...editReviewState() } }) }} segment={selected} disabled={Boolean(wordRecording || selected.timingLocked)} onMove={(wordId, delta) => {
                   const moved = moveWord(selected, wordId, delta)
                   if (moved !== selected) dispatch({ type: 'update-segment', id: selected.id, patch: { words: moved.words, origin: 'manual', ...editReviewState() } })
                 }} />
-                <div className="word-list">{selected.words.map((word, index) => <div className={`word-chip-row word-origin-${word.origin ?? selected.origin ?? 'unknown'}`} key={word.id}><button className={`word-chip ${wordRecording && index === wordRecording.nextIndex ? 'is-recording-target' : ''} ${wordRecording && index < wordRecording.nextIndex ? 'is-recorded' : ''}`} title={`${formatTimecode(word.start)} – ${formatTimecode(word.end)} · ${word.origin === 'asr' ? 'Timestamp ASR · cần nghe xác nhận' : word.origin === 'aligned' ? 'WhisperX thử nghiệm · cần nghe xác nhận' : word.origin === 'estimated' ? 'Ước lượng · căn tay theo giọng' : 'Đã căn thủ công'}`} onClick={() => { seekTo(word.start); if (word.origin !== 'manual') setLoopSegmentId(selected.id) }} disabled={Boolean(wordRecording)}><span>{word.text}</span><small>{formatClock(word.start)} · {word.origin === 'asr' ? 'ASR' : word.origin === 'aligned' ? 'ALIGN' : word.origin === 'estimated' ? 'ƯỚC LƯỢNG' : 'TAY'}</small>{word.confidence !== undefined && <i style={{ opacity: Math.max(0.3, word.confidence) }} />}</button><button type="button" className={`word-lock ${word.timingLocked ? 'is-locked' : ''}`} aria-label={`${word.timingLocked ? 'Mở khóa' : 'Khóa'} timing từ ${word.text}`} title={`${word.timingLocked ? 'Mở khóa' : 'Khóa'} timing từ`} disabled={Boolean(wordRecording || selected.timingLocked)} onClick={() => dispatch({ type: 'update-segment', id: selected.id, patch: { words: selected.words.map((item) => item.id === word.id ? { ...item, timingLocked: !item.timingLocked } : item) } })}>{word.timingLocked ? '🔒' : '◇'}</button></div>)}</div>
+                <div className="word-list">{selected.words.map((word, index) => <div className={`word-chip-row word-origin-${word.origin ?? selected.origin ?? 'unknown'}`} key={word.id}><button className={`word-chip ${wordRecording && index === wordRecording.nextIndex ? 'is-recording-target' : ''} ${wordRecording && index < wordRecording.nextIndex ? 'is-recorded' : ''}`} title={`${formatTimecode(word.start)} – ${formatTimecode(word.end)} · ${word.origin === 'asr' ? 'Timestamp ASR · cần nghe xác nhận' : word.origin === 'aligned' ? 'Căn trực tiếp theo audio' : word.origin === 'estimated' ? 'Ước lượng · căn tay theo giọng' : 'Đã căn thủ công'}`} onClick={() => { seekTo(word.start); if (word.origin !== 'manual') setLoopSegmentId(selected.id) }} disabled={Boolean(wordRecording)}><span>{word.text}</span><small>{formatClock(word.start)} · {word.origin === 'asr' ? 'ASR' : word.origin === 'aligned' ? 'ALIGN' : word.origin === 'estimated' ? 'ƯỚC LƯỢNG' : 'TAY'}</small>{word.confidence !== undefined && <i style={{ opacity: Math.max(0.3, word.confidence) }} />}</button><button type="button" className={`word-lock ${word.timingLocked ? 'is-locked' : ''}`} aria-label={`${word.timingLocked ? 'Mở khóa' : 'Khóa'} timing từ ${word.text}`} title={`${word.timingLocked ? 'Mở khóa' : 'Khóa'} timing từ`} disabled={Boolean(wordRecording || selected.timingLocked)} onClick={() => dispatch({ type: 'update-segment', id: selected.id, patch: { words: selected.words.map((item) => item.id === word.id ? { ...item, timingLocked: !item.timingLocked } : item) } })}>{word.timingLocked ? '🔒' : '◇'}</button></div>)}</div>
               </> : <div className="word-empty">Chưa có timing cấp từ.<br />Bấm “Căn từ theo beat” để tạo và chấm từng từ.</div>}
             </section>
             <section className="inspector-section quality-section">
@@ -1734,11 +1722,11 @@ function App() {
             {providerProfile.kind === 'local' && <>
               <div className="form-grid"><label><span className="field-label">Model Whisper</span><select className="text-input" value={providerProfile.model} onChange={(event) => setProviderProfile({ ...providerProfile, model: event.target.value })}><option value="tiny">tiny · nhanh, nhẹ</option><option value="base">base · cân bằng</option><option value="small">small · chính xác hơn</option><option value="medium">medium · tốt hơn, chậm hơn</option><option value="large-v3-turbo">large-v3-turbo · cục bộ, nặng</option></select></label><label><span className="field-label">Ngôn ngữ</span><input className="text-input" value={providerProfile.language} onChange={(event) => setProviderProfile({ ...providerProfile, language: event.target.value })} placeholder="vi" /></label></div>
               <label className="field-label" htmlFor="local-source">Nguồn nhận dạng</label><select id="local-source" className="text-input" value={providerProfile.localSource ?? 'original'} onChange={(event) => setProviderProfile({ ...providerProfile, localSource: event.target.value as 'original' | 'vocal' | 'auto' })}><option value="original">Original mix · không tách vocal</option><option value="vocal">Vocal stem · chính xác hơn nếu đã tách</option><option value="auto">Auto · ưu tiên vocal stem</option></select>
-              <label className="toggle-row"><input type="checkbox" checked={providerProfile.useForcedAlignment ?? false} onChange={(event) => setProviderProfile({ ...providerProfile, useForcedAlignment: event.target.checked })} /><span className="toggle-switch" /><span><strong>Căn tinh WhisperX (thử nghiệm)</strong><small>Chạy sau ASR để tinh chỉnh ranh giới từ; tắt mặc định</small></span></label>
-              {providerProfile.useForcedAlignment && <><label className="field-label" htmlFor="alignment-model-path">Model căn tinh tùy chọn</label><input id="alignment-model-path" className="text-input" value={providerProfile.alignmentModelPath ?? ''} onChange={(event) => setProviderProfile({ ...providerProfile, alignmentModelPath: event.target.value || undefined })} placeholder="Để trống để dùng model mặc định theo ngôn ngữ" /><p className="form-hint">Cần cài WhisperX trong cùng Python runtime. Model ngôn ngữ có thể tự tải ở lần chạy đầu; lời hát, từ ngoài từ điển và giọng chồng có thể cần rà tay.</p></>}
+              <p className="form-hint">Có lời: căn trực tiếp bằng Stable-ts như Vietkara. Chưa có lời: Whisper nhận dạng từng từ. Cần stable-ts 2.19.1 trong runtime đã chọn.</p>
               <p className="form-hint">Beat được giữ làm audio phát và audio render. Audio ca sĩ/vocal stem chỉ dùng để phân tích mốc từ, không bị trộn vào video karaoke.</p><label className="field-label" htmlFor="local-model-path">Thư mục model (tuỳ chọn)</label><input id="local-model-path" className="text-input" value={providerProfile.localModelPath ?? ''} onChange={(event) => setProviderProfile({ ...providerProfile, localModelPath: event.target.value || undefined })} placeholder="Để trống để Faster-Whisper tự tìm/tải model" />
               <p className="form-hint">Chọn Original để phân tích trực tiếp file ca sĩ; chọn Vocal stem nếu đã có stem sạch. Cả hai chỉ tạo timestamp, không thay đổi audio render.</p>
               <label className="field-label" htmlFor="local-python-path">Python executable (tuỳ chọn)</label><input id="local-python-path" className="text-input" value={providerProfile.localPythonPath ?? ''} onChange={(event) => setProviderProfile({ ...providerProfile, localPythonPath: event.target.value || undefined })} placeholder="C:\\Python312\\python.exe · để trống dùng Python mặc định" />
+              <div className="runtime-check-row"><button className="button button-small button-quiet" disabled={!window.kara} onClick={async () => { const path = await window.kara?.pickRuntimePath('python'); if (path) { setProviderProfile({ ...providerProfile, localPythonPath: path }); setRuntimeCheck({ busy: false, ok: false, message: 'Đã chọn Python; bấm Kiểm tra runtime.' }) } }}>Chọn Python…</button><button className="button button-small button-quiet" disabled={!window.kara} onClick={async () => { const path = await window.kara?.pickRuntimePath('model'); if (path) setProviderProfile({ ...providerProfile, localModelPath: path }) }}>Chọn model đã tải…</button></div>
               <div className="runtime-check-row"><button type="button" className="button button-small button-quiet" onClick={() => void checkLocalRuntime()} disabled={!window.kara || runtimeCheck.busy}>{runtimeCheck.busy ? 'Đang kiểm tra…' : 'Kiểm tra runtime'}</button>{runtimeCheck.message && <span className={runtimeCheck.ok ? 'runtime-check-ok' : 'runtime-check-warning'}>{runtimeCheck.message}</span>}</div>
             </>}
             {providerProfile.kind === 'mock' && <div className="mock-note"><span className="mock-spark">✳</span><div><strong>Demo không gửi dữ liệu</strong><p>Tạo mốc từ lời để thử timeline offline. Đây không phải kết quả nhận dạng giọng thật.</p></div></div>}

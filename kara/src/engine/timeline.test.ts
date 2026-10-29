@@ -45,3 +45,14 @@ describe('locked word timing', () => {
     ])
   })
 })
+
+
+describe('word edge editing', () => {
+  it('clamps edges to neighboring words and respects locks', async () => {
+    const { resizeWord } = await import('./timeline')
+    const segment = { id: 'line', text: 'a b', start: 0, end: 4, speakerRole: 'unknown' as const, words: [{ id: 'a', text: 'a', start: 0, end: 1 }, { id: 'b', text: 'b', start: 2, end: 3 }] }
+    expect(resizeWord(segment, 'a', 'end', 4).words[0].end).toBe(2)
+    expect(resizeWord(segment, 'b', 'start', 0).words[1].start).toBe(1)
+    expect(resizeWord({ ...segment, timingLocked: true }, 'a', 'end', 2).words[0].end).toBe(1)
+  })
+})

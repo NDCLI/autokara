@@ -23,7 +23,7 @@ function shouldIgnore(filePath) {
   if (!relative) return false
   const parts = relative.split('/')
   if (ignoredTopLevel.has(parts[0])) return true
-  if (parts[0] === 'runtime' && ['repro-check', 'repro-check-song-45s.wav', 'qwen-probe', 'qwen-cache'].includes(parts[1])) return true
+  if (parts[0] === 'runtime' && parts[1] !== 'windows-python312-cpu-requirements.lock.txt') return true
   if (parts.includes('__pycache__') || parts.includes('.pytest_cache') || parts.includes('.vitest')) return true
   if (parts[0] === 'node_modules' && ['.bin', '.vite', '.vite-temp', 'electron', 'electron-prebuilt', 'electron-prebuilt-compile'].includes(parts[1])) return true
   if (/\.(?:test|spec)\.[^/]+$/i.test(relative) || /\.(?:d\.(?:ts|cts|mts)|pyc|pyo|obj|o)$/i.test(relative)) return true

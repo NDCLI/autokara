@@ -1,7 +1,7 @@
 export type CachedTranscript = {
   segments: Array<{ id: string; text: string; start: number; end: number; words: Array<{ id: string; text: string; start: number; end: number }> }>
   duration?: number
-  timingMethod?: 'asr' | 'forced-alignment'
+  timingMethod?: 'asr' | 'direct-lyrics-alignment'
   device?: 'cpu' | 'cuda'
   deviceFallbackReason?: string
 }

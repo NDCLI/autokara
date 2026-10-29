@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('kara', {
   saveExport: (format, content, suggestedName) => ipcRenderer.invoke('save-export', format, content, suggestedName),
   loadProviderSettings: () => ipcRenderer.invoke('load-provider-settings'),
   saveProviderSettings: (profile) => ipcRenderer.invoke('save-provider-settings', profile),
+  pickRuntimePath: (kind) => ipcRenderer.invoke('pick-runtime-path', kind),
   checkLocalRuntime: (profile) => ipcRenderer.invoke('check-local-runtime', profile),
   separateVocals: (jobId, audioPath, pythonPath) => ipcRenderer.invoke('separate-vocals', jobId, audioPath, pythonPath),
   cancelSeparation: (jobId) => ipcRenderer.invoke('cancel-separation', jobId),

@@ -486,3 +486,99 @@ kbd { padding: 2px 5px; border: 1px solid #705d3e; border-bottom-width: 2px; bor
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* Keep editing space available at laptop sizes. */
+.guided-next-step { display: none; }
+.video-settings-disclosure > summary { cursor: pointer; padding: 8px; color: var(--muted); font-size: 12px; }
+.video-settings-disclosure[open] .video-position-controls { margin-top: 10px; }
+.video-preview-panel { flex-shrink: 0; }
+.video-preview-stage { max-height: 32vh;  max-width: 100%; justify-self: center; }
+.workflow-step { min-width: 0; flex-basis: 0; }
+.workflow-step small { display: none; }
+.workspace.inspector-hidden { grid-template-columns: minmax(150px, var(--source-rail-width, 198px)) 6px minmax(0, 1fr); }
+@media (max-width: 1280px) {
+  .workspace { grid-template-columns: minmax(150px, 190px) 6px minmax(0, 1fr) 6px minmax(210px, 240px); }
+  .workspace.inspector-hidden { grid-template-columns: 170px 6px minmax(0, 1fr); }
+}
+@media (max-width: 1080px) {
+  .workspace { grid-template-columns: 170px 6px minmax(0, 1fr); }
+}
+
+/* Studio workspace: lyrics at left, stage above transport, independently scrolling timeline. */
+.editor-column { overflow: hidden; gap: 8px; padding: 10px 12px; }
+.editor-column > * { flex-shrink: 0; }
+.editor-column > .segment-list { flex: 1 1 120px; min-height: 100px; overflow-y: auto; }
+.editor-column > .video-preview-panel { margin: 0; padding: 8px; max-height: 36vh; overflow: auto; }
+.video-preview-stage {  height: auto; max-height: 27vh; aspect-ratio: 16/9; }
+.video-settings-disclosure[open] { max-height: 160px; overflow-y: auto; }
+.workflow-strip { display: none; }
+.timeline-heading { margin: 2px 0; flex-wrap: wrap; gap: 6px; }
+.transport-panel { padding: 9px; }
+.wave-panel { margin-top: 6px; }
+.waveform { height: 38px; }
+.timeline-footer { padding: 5px 0; }
+.lyrics-editor-label { margin: 12px 0 6px; color: var(--muted); font-size: 11px; }
+.lyrics-draft { flex: 1 0 130px; width: 100%; min-height: 130px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; padding: 10px; background: #101628; color: #e5e8f4; font: 13px/1.6 sans-serif; margin-bottom: 8px; }
+.source-rail .source-spacer { flex: 0; height: 8px; }
+.source-rail { padding: 10px; }
+.review-queue { max-height: 110px; margin: 0; }
+@media (max-height: 760px) { .video-preview-stage { max-height: 22vh; } .transport-current small, .timeline-heading p, .wave-footnote { display: none; } .topbar { height: 48px; flex-basis: 48px; } }
+
+.studio-top { display: grid; grid-template-columns: minmax(190px, .68fr) minmax(0, 1.32fr); gap: 10px; height: clamp(165px, 23vh, 235px); min-height: 0; }
+.lyrics-input-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--line); border-radius: 9px; padding: 10px; background: #12182a; }
+.lyrics-input-panel .lyrics-editor-label { margin: 0 0 6px; }
+.lyrics-input-panel .lyrics-draft { flex: 1 1 auto; min-height: 0; resize: none; }
+.studio-top .video-preview-panel { margin: 0; padding: 8px; min-height: 0; overflow: auto; }
+.studio-top .video-preview-stage { max-height: none; justify-self: center !important; }
+
+.studio-top .video-settings-disclosure { font-size: 11px; }
+.source-rail .source-group-label { margin-top: 12px; }
+.source-rail .source-card { min-height: 48px; }
+@media (max-width: 1050px) { .studio-top { grid-template-columns: minmax(180px, .9fr) minmax(0, 1.1fr); } .timeline-heading .button { padding: 0 8px; } }
+
+.studio-top { height: clamp(165px, 23vh, 235px); }
+.studio-top .video-preview-stage { height: auto; max-height: 17vh; aspect-ratio: 16/9; }
+.lyrics-input-panel .button { min-height: 32px; flex: 0 0 auto; }
+.editor-column > .transport-panel { flex: 0 0 auto; }
+.editor-column > .timeline-heading { flex: 0 0 auto; }
+.editor-column > .timeline-column-labels { flex: 0 0 auto; }
+.editor-column > .segment-list { flex: 1 1 auto; min-height: 80px; }
+.timeline-heading > div:first-child p { display: none; }
+.timeline-heading .section-title { font-size: 14px; }
+.timeline-actions { flex-wrap: nowrap; }
+.timeline-actions .button { white-space: nowrap; }
+.studio-top .video-preview-panel > .video-settings-disclosure { display: block; }
+.studio-top .video-preview-panel > .video-settings-disclosure:not([open]) .video-position-controls { display: none; }
+.studio-top .video-preview-panel > .video-settings-disclosure > summary { padding: 3px 6px; }
+.transport-panel { padding: 7px 10px 8px; }
+.wave-panel { margin-top: 5px; }
+.wave-time-labels { margin-bottom: 3px; }
+.waveform { height: 34px; }
+.wave-bars { padding: 5px 4px; }
+.timeline-footer { font-size: 9px; }
+@media (max-width: 1200px) {
+  .studio-top { grid-template-columns: minmax(170px, .62fr) minmax(0, 1.38fr); }
+  .timeline-actions .review-status { display: none; }
+  .timeline-actions .button { padding-inline: 7px; font-size: 9px; }
+}
+@media (max-width: 900px) {
+  .studio-top { grid-template-columns: minmax(150px, .58fr) minmax(0, 1.42fr); gap: 6px; }
+  .lyrics-input-panel { padding: 7px; }
+  .lyrics-input-panel .lyrics-draft { font-size: 11px; }
+  .timeline-actions .button-add { display: none; }
+  .segment-row { grid-template-columns: minmax(130px, 36%) minmax(90px, 1fr) 48px; }
+}
+@media (max-height: 700px) {
+  .studio-top { height: 155px; }
+  .studio-top .video-preview-stage { max-height: 115px; }
+  .waveform { height: 27px; }
+  .transport-controls { gap: 5px; }
+  .play-button { width: 32px; height: 32px; }
+}
+.transport-current small, .wave-footnote, .timeline-heading p { display: none; }
+.transport-panel { padding: 8px 10px; }
+.timeline-footer { min-height: 24px; font-size: 10px; }
+.empty-segments { padding: 14px; min-height: 90px; gap: 6px; }
+.segment-copy strong { font-size: 12px; }
+.section-title { font-size: 14px; }
+@media (max-height: 650px) { .studio-top { height: 170px; } .waveform { height: 25px; } .timeline-footer > span:last-child { display: none; } }

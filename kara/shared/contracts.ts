@@ -60,8 +60,6 @@ export type ProviderProfile = {
   localModelPath?: string
   localPythonPath?: string
   localDevice?: 'auto' | 'cpu' | 'cuda'
-  useForcedAlignment?: boolean
-  alignmentModelPath?: string
   localSource?: LocalSource
   useVocalSeparation?: boolean
 }
@@ -114,6 +112,7 @@ export type RenderProgress = {
 export type RenderResult = { path: string } | null
 
 export type KaraProject = {
+  lyricsDraft?: string
   schemaVersion: 3
   projectId: string
   revision: number
@@ -154,7 +153,7 @@ export type NormalizedTranscript = {
     words: TimedWord[]
   }>
   duration?: number
-  timingMethod?: 'asr' | 'forced-alignment'
+  timingMethod?: 'asr' | 'direct-lyrics-alignment'
   device?: 'cpu' | 'cuda'
   deviceFallbackReason?: string
   cacheHit?: boolean
@@ -171,7 +170,7 @@ export const DEFAULT_VIDEO_SETTINGS: VideoSettings = {
 }
 
 export const DEFAULT_PROVIDER: ProviderProfile = {
-  kind: 'mock',
+  kind: 'local',
   model: 'small',
   language: 'vi',
 }

@@ -53,3 +53,14 @@ export function moveWord(segment: LyricSegment, wordId: string, delta: number): 
     words: words.map((item) => item.id === wordId ? { ...item, start, end: start + duration, origin: 'manual' } : item),
   }
 }
+
+export function resizeWord(segment: LyricSegment, wordId: string, edge: 'start' | 'end', value: number): LyricSegment {
+  if (segment.timingLocked || !Number.isFinite(value)) return segment
+  const index = segment.words.findIndex(word => word.id === wordId)
+  const word = segment.words[index]
+  if (!word || word.timingLocked) return segment
+  const start = edge === 'start' ? Math.max(segment.start, segment.words[index - 1]?.end ?? segment.start, Math.min(word.end - .01, value)) : word.start
+  const end = edge === 'end' ? Math.min(segment.end, segment.words[index + 1]?.start ?? segment.end, Math.max(word.start + .01, value)) : word.end
+  if (end <= start) return segment
+  return { ...segment, words: segment.words.map(item => item.id === wordId ? { ...item, start, end, origin: 'manual' } : item) }
+}

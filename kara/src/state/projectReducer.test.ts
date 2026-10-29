@@ -78,3 +78,13 @@ describe('project edit transactions', () => {
     expect(state.transactionBase).toBeUndefined()
   })
 })
+
+
+describe('embedded lyrics', () => {
+  it('keeps pasted lyrics in project JSON and undo history', () => {
+    const history = createHistory(createNewProject({ provider: DEFAULT_PROVIDER, exportOptions: DEFAULT_EXPORT_OPTIONS }))
+    const edited = projectReducer(history, { type: 'set-lyrics', text: 'Một câu\nHai câu' })
+    expect(JSON.parse(JSON.stringify(edited.present)).lyricsDraft).toBe('Một câu\nHai câu')
+    expect(projectReducer(edited, { type: 'undo' }).present.lyricsDraft).toBeUndefined()
+  })
+})

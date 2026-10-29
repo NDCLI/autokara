@@ -22,13 +22,14 @@ describe('transcription cache', () => {
     const audio = path.join(directory, 'song.wav')
     await writeFile(audio, 'audio bytes A')
     const cache = createTranscriptionCache({ directory: path.join(directory, 'cache') })
-    const profile = { kind: 'local', model: 'small', language: 'vi', useForcedAlignment: false }
+    const profile = { kind: 'local', model: 'small', language: 'vi', localSource: 'original' }
     const baseline = await cache.keyFor(audio, profile, 'lời một')
     expect(await cache.keyFor(audio, { ...profile, model: 'medium' }, 'lời một')).not.toBe(baseline)
     expect(await cache.keyFor(audio, { ...profile, localPythonPath: 'C:/venv/python.exe' }, 'lời một')).not.toBe(baseline)
     expect(await cache.keyFor(audio, profile, 'lời hai')).not.toBe(baseline)
     expect(await cache.keyFor(audio, profile, 'lời một', 'credential-a')).not.toBe(baseline)
     expect(await cache.keyFor(audio, profile, 'lời một', '', '2.0')).not.toBe(baseline)
+    expect(await cache.keyFor(audio, { ...profile, localSource: 'vocal' }, 'lời một')).not.toBe(baseline)
     await writeFile(audio, 'audio bytes B')
     expect(await cache.keyFor(audio, profile, 'lời một')).not.toBe(baseline)
   })
